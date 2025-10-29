@@ -1,0 +1,15 @@
+{
+  "name": "voting-backend",
+  "version": "1.0.0",
+  "description": "API Gateway for Fabric Voting App",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "fabric-ca-client": "^2.2.19",
+    "fabric-network": "^2.2.19"
+  }
+}
