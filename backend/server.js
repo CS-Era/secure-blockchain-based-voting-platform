@@ -1,67 +1,106 @@
 'use strict';
 
-// 1. CARICA LE VARIABILI D'AMBIENTE DAL FILE .env
+// --- 1. IMPORTAZIONI ---
+
+// Carica prima le variabili .env
 require('dotenv').config();
 
+// Moduli di Sicurezza e API
+const express = require('express');
+const jwt = require('jsonwebtoken');       // Per creare e verificare i token di sessione
+const bcrypt = require('bcryptjs');      // Per hashing e "salting" delle password
+const db = require('./db');               
+
+// Moduli Hyperledger Fabric
 const FabricCAServices = require('fabric-ca-client');
 const { Wallets, Gateway } = require('fabric-network');
+
+// Moduli Node.js
 const fs = require('fs');
 const path = require('path');
-const express = require('express');
+
+// --- 2. CONFIGURAZIONE E COSTANTI ---
+
 const app = express();
 
-// --- Configurazione Globale ---
-// 2. LEGGI LE VARIABILI DA process.env
+// Carica le variabili da .env
 const PORT = process.env.PORT || 3000;
 const ORG_ADMIN_USER = process.env.ORG_ADMIN_USER;
 const ORG_ADMIN_PASS = process.env.ORG_ADMIN_PASS;
 const CA_REGISTRAR_USER = process.env.CA_REGISTRAR_USER;
 const CA_REGISTRAR_PASS = process.env.CA_REGISTRAR_PASS;
 const DEFAULT_VOTER_PASS = process.env.DEFAULT_VOTER_PASS;
+const JWT_SECRET = process.env.JWT_SECRET; // Segreto per firmare i token
 
 // Costanti fabric-network e chaincode
 const CHANNEL_NAME = 'votingchannel';
-const CONTRACT_NAME = 'votingcc';
+const CONTRACT_NAME = 'votingcc'; // Il nome del tuo chaincode
 const MSP_ID = 'Org1MSP';
 
 // Path ai file critici
 const ccpPath = path.resolve(__dirname, '..', 'fabric-samples', 'test-network', 'organizations', 'peerOrganizations', 'org1.example.com', 'connection-org1.json');
 const walletPath = path.join(__dirname, 'wallet');
 
-// Check variabili .env caricate
-if (!ORG_ADMIN_USER || !ORG_ADMIN_PASS || !CA_REGISTRAR_USER || !CA_REGISTRAR_PASS || !DEFAULT_VOTER_PASS) {
-    console.error('ERRORE: Variabili d\'ambiente segrete mancanti.');
+// Check di sicurezza all'avvio: verifica che le variabili d'ambiente critiche siano caricate
+if (!ORG_ADMIN_USER || !ORG_ADMIN_PASS || !CA_REGISTRAR_USER || !CA_REGISTRAR_PASS || !DEFAULT_VOTER_PASS || !JWT_SECRET) {
+    console.error('ERRORE CRITICO: Variabili d\'ambiente segrete mancanti.');
     console.error('Assicurati di aver creato e configurato il file .env nella cartella /backend');
-    process.exit(1);
+    process.exit(1); // Esce se i segreti non sono caricati
 }
 console.log(`✅ Variabili di environment caricate correttamente`);
 
+// --- 3. MIDDLEWARE DI SICUREZZA ---
 
-// --- Funzioni Helper ---
+// Permette al server di leggere JSON dal body delle richieste
+app.use(express.json());
 
 /**
- * Connette al gateway Fabric usando una specifica identità.
+ * Middleware: Verifica il Token JWT (Autenticazione)
+ *
+ * Controlla l'header 'Authorization'. Se il token è valido,
+ * aggiunge il payload del token (i dati dell'utente) a 'req.user'.
+ * Se non è valido, blocca la richiesta.
  */
-async function connectToGateway(identityName) {
-    const wallet = await Wallets.newFileSystemWallet(walletPath);
-    const identity = await wallet.get(identityName);
-    if (!identity) {
-        throw new Error(`Identità '${identityName}' non trovata nel wallet.`);
+const verifyToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Formato "Bearer TOKEN"
+
+    if (token == null) {
+        // 401 Unauthorized (Non autenticato)
+        return res.status(401).json({ error: 'Accesso negato: token mancante.' });
     }
-    const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
-    const gateway = new Gateway();
-    await gateway.connect(ccp, {
-        wallet,
-        identity: identityName,
-        discovery: { enabled: true, asLocalhost: true }
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            // 403 Forbidden (Autenticato ma token non valido/scaduto)
+            return res.status(403).json({ error: 'Token non valido o scaduto.' });
+        }
+        
+        // Il token è valido. Allega i dati dell'utente alla richiesta
+        req.user = user; 
+        next(); // Prosegui alla funzione dell'endpoint
     });
-    const network = await gateway.getNetwork(CHANNEL_NAME);
-    const contract = network.getContract(CONTRACT_NAME);
-    return { gateway, contract };
-}
+};
 
 /**
- * Iscrive ENTRAMBI gli Admin (da eseguire solo una volta all'avvio)
+ * Middleware: Verifica Ruolo Admin (Autorizzazione)
+ *
+ * Controlla che l'utente (allegato da 'verifyToken') abbia il ruolo 'admin'.
+ * DA USARE SEMPRE *DOPO* 'verifyToken'.
+ */
+const isAdmin = (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        // 403 Forbidden (Non autorizzato a compiere questa azione)
+        return res.status(403).json({ error: 'Accesso negato: questa azione richiede privilegi di amministratore.' });
+    }
+    next();
+};
+
+
+// --- 4. FUNZIONI HELPER (BLOCKCHAIN) ---
+
+/**
+ * Iscrive ENTRAMBI gli Admin (Ledger e Registrar) nel wallet all'avvio.
  */
 async function enrollAdmins() {
     try {
@@ -75,12 +114,8 @@ async function enrollAdmins() {
         if (!orgAdminExists) {
             const enrollment = await ca.enroll({ enrollmentID: ORG_ADMIN_USER, enrollmentSecret: ORG_ADMIN_PASS });
             const x509Identity = {
-                credentials: {
-                    certificate: enrollment.certificate,
-                    privateKey: enrollment.key.toBytes(),
-                },
-                mspId: MSP_ID,
-                type: 'X.509',
+                credentials: { certificate: enrollment.certificate, privateKey: enrollment.key.toBytes() },
+                mspId: MSP_ID, type: 'X.509',
             };
             await wallet.put(ORG_ADMIN_USER, x509Identity);
             console.log(`✅ Identità ${ORG_ADMIN_USER} (Ledger Admin) iscritta e salvata nel wallet`);
@@ -93,12 +128,8 @@ async function enrollAdmins() {
         if (!caRegistrarExists) {
             const enrollment = await ca.enroll({ enrollmentID: CA_REGISTRAR_USER, enrollmentSecret: CA_REGISTRAR_PASS });
             const x509Identity = {
-                credentials: {
-                    certificate: enrollment.certificate,
-                    privateKey: enrollment.key.toBytes(),
-                },
-                mspId: MSP_ID,
-                type: 'X.509',
+                credentials: { certificate: enrollment.certificate, privateKey: enrollment.key.toBytes() },
+                mspId: MSP_ID, type: 'X.509',
             };
             await wallet.put(CA_REGISTRAR_USER, x509Identity);
             console.log(`✅ Identità ${CA_REGISTRAR_USER} (CA Registrar) iscritta e salvata nel wallet`);
@@ -107,60 +138,78 @@ async function enrollAdmins() {
         }
 
     } catch (error) {
-        console.error(`Errore nell'iscrizione degli Admin: ${error}`);
+        console.error(`ERRORE CRITICO nell'iscrizione degli Admin. Controlla la rete Fabric: ${error}`);
         process.exit(1);
     }
 }
 
 /**
- * Registra e iscrive un nuovo ELETTORE (voter)
+ * Connette al gateway Fabric usando una specifica identità dal wallet.
  */
-async function registerAndEnrollVoter(voterID) {
+async function connectToGateway(identityName) {
+    const wallet = await Wallets.newFileSystemWallet(walletPath);
+    const identity = await wallet.get(identityName);
+    if (!identity) {
+        throw new Error(`Identità '${identityName}' non trovata nel wallet locale. Assicurati che l'utente sia stato registrato.`);
+    }
+    
+    const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
+    const gateway = new Gateway();
+    await gateway.connect(ccp, {
+        wallet,
+        identity: identityName,
+        discovery: { enabled: true, asLocalhost: true }
+    });
+    
+    const network = await gateway.getNetwork(CHANNEL_NAME);
+    const contract = network.getContract(CONTRACT_NAME);
+    return { gateway, contract };
+}
+
+/**
+ * Crea l'identità di un elettore sulla blockchain (CA + Ledger).
+ * Questa funzione è chiamata internamente da /api/admin/create-user.
+ */
+async function registerVoterOnBlockchain(voterID) {
     const wallet = await Wallets.newFileSystemWallet(walletPath);
 
-    // 1. Controlla se l'elettore esiste già nel wallet
+    // Controlla se è già nel wallet locale (non dovrebbe succedere se il DB è allineato)
     const voterExists = await wallet.get(voterID);
     if (voterExists) {
-        throw new Error(`L'elettore ${voterID} è già nel wallet`);
+        throw new Error(`L'elettore ${voterID} è già nel wallet locale.`);
     }
 
-    // 2. Carica l'identità del REGISTRAR (admin) per registrare il nuovo elettore
+    // 1. Contatta la CA (come Registrar) per registrare l'identità
     const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
     const ca = new FabricCAServices(ccp.certificateAuthorities['ca.org1.example.com'].url);
     const registrarIdentity = await wallet.get(CA_REGISTRAR_USER);
     if (!registrarIdentity) {
-        throw new Error(`Identità Registrar (${CA_REGISTRAR_USER}) non trovata. Avvia il server.`);
+        throw new Error(`Identità Registrar (${CA_REGISTRAR_USER}) non trovata. Riavvia il server.`);
     }
     const provider = wallet.getProviderRegistry().getProvider(registrarIdentity.type);
     const registrarUser = await provider.getUserContext(registrarIdentity, CA_REGISTRAR_USER);
 
-    // 3. Registra il nuovo elettore con la CA (usando il REGISTRAR)
     await ca.register({
         affiliation: 'org1.department1',
         enrollmentID: voterID,
-        // 3. USA LA VARIABILE D'AMBIENTE
-        enrollmentSecret: DEFAULT_VOTER_PASS,
+        enrollmentSecret: DEFAULT_VOTER_PASS, // Usa la password di default dal .env
         role: 'client',
         attrs: [
             { name: 'role', value: 'voter', ecert: true },
             { name: 'voterID', value: voterID, ecert: true }
         ]
-    }, registrarUser); // <-- USA L'UTENTE REGISTRAR
+    }, registrarUser);
 
-    // 4. Iscrivi (enroll) il nuovo elettore e salva il suo certificato nel wallet
+    // 2. Iscrivi (enroll) l'elettore per ottenere il suo certificato e salvarlo nel wallet
     const enrollment = await ca.enroll({ enrollmentID: voterID, enrollmentSecret: DEFAULT_VOTER_PASS });
     const x509Identity = {
-        credentials: {
-            certificate: enrollment.certificate,
-            privateKey: enrollment.key.toBytes(),
-        },
-        mspId: MSP_ID,
-        type: 'X.509',
+        credentials: { certificate: enrollment.certificate, privateKey: enrollment.key.toBytes() },
+        mspId: MSP_ID, type: 'X.509',
     };
     await wallet.put(voterID, x509Identity);
 
-    // 5. ORA, registra l'elettore sul LEDGER usando l'identità ADMIN DEL LEDGER
-    const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER); 
+    // 3. Chiama il chaincode (come Ledger Admin) per registrare l'elettore sul Ledger
+    const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
     try {
         console.log(`Sto registrando ${voterID} sul ledger...`);
         await contract.submitTransaction('RegisterVoter', voterID);
@@ -168,37 +217,122 @@ async function registerAndEnrollVoter(voterID) {
         gateway.disconnect();
     }
 
-    return `Elettore ${voterID} registrato con la CA, iscritto nel wallet e abilitato sul ledger.`;
+    return `Elettore ${voterID} registrato con successo (CA, Wallet, Ledger).`;
 }
 
-// --- Setup del Server API ---
 
-app.use(express.json());
+// --- 5. ENDPOINT DELL'API ---
 
-app.get('/api/ping', (req, res) => {
-    res.json({ status: 'ok', message: 'Il server di voto è attivo' });
-});
+// --- API PUBBLICHE (Autenticazione) ---
 
-app.post('/api/register-voter', async (req, res) => {
+/**
+ * [PUBBLICO] Login
+ * Prende matricola e password, restituisce un JWT se validi.
+ */
+app.post('/api/login', async (req, res) => {
     try {
-        const { voterID } = req.body;
-        if (!voterID) {
-            return res.status(400).json({ error: 'voterID mancante' });
+        const { matricola, password } = req.body;
+        if (!matricola || !password) {
+            return res.status(400).json({ error: 'Matricola e password richiesti' });
         }
-        const message = await registerAndEnrollVoter(voterID);
-        res.status(201).json({ message });
+
+        // 1. Cerca l'utente nel DB
+        const result = await db.query('SELECT * FROM users WHERE matricola = $1', [matricola]);
+        const user = result.rows[0];
+
+        if (!user) {
+            return res.status(401).json({ error: 'Credenziali non valide' }); // 401 Unauthorized
+        }
+
+        // 2. Compara la password fornita con l'hash nel DB
+        // SICUREZZA: bcrypt.compare previene i "Timing Attacks"
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+
+        if (!isMatch) {
+            return res.status(401).json({ error: 'Credenziali non valide' }); // 401 Unauthorized
+        }
+
+        // 3. Credenziali valide! Genera il token JWT
+        const payload = {
+            id: user.id,
+            matricola: user.matricola,
+            role: user.role // 'student' o 'admin'
+        };
+
+        const token = jwt.sign(
+            payload,
+            JWT_SECRET,
+            { expiresIn: '1h' } // Il token scade dopo 1 ora
+        );
+
+        res.json({
+            message: 'Login effettuato con successo',
+            token: token,
+            role: user.role
+        });
+
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
+        console.error("Errore in /api/login:", error);
+        res.status(500).json({ error: 'Errore interno del server' });
     }
 });
 
-app.post('/api/create-election', async (req, res) => {
+
+// --- API PROTETTE (Amministrazione) ---
+
+/**
+ * [PROTETTO: ADMIN] Crea un nuovo utente (studente o admin) nel DB
+ * e crea la sua identità sulla blockchain.
+ */
+app.post('/api/admin/create-user', verifyToken, isAdmin, async (req, res) => {
+    try {
+        const { matricola, password, role } = req.body;
+        if (!matricola || !password || !role) {
+            return res.status(400).json({ error: 'Matricola, password e ruolo richiesti' });
+        }
+        if (role !== 'student' && role !== 'admin') {
+            return res.status(400).json({ error: 'Ruolo non valido. Usare "student" o "admin".' });
+        }
+
+        // SICUREZZA: Genera HASH e SALT
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+
+        // 1. Inserisci l'utente nel DB (PostgreSQL)
+        const result = await db.query(
+            'INSERT INTO users (matricola, password_hash, role) VALUES ($1, $2, $3) RETURNING id, matricola, role',
+            [matricola, passwordHash, role]
+        );
+        
+        // 2. Crea l'identità sulla Blockchain (CA + Wallet + Ledger)
+        await registerVoterOnBlockchain(matricola);
+
+        res.status(201).json({
+            message: 'Utente creato con successo (DB e Blockchain)',
+            user: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error("Errore in /api/admin/create-user:", error);
+        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
+            return res.status(409).json({ error: 'Matricola già esistente' });
+        }
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
+
+/**
+ * [PROTETTO: ADMIN] Crea una nuova elezione.
+ */
+app.post('/api/create-election', verifyToken, isAdmin, async (req, res) => {
     try {
         const { id, title, proposals } = req.body;
+        if (!id || !title || !proposals || !Array.isArray(proposals)) {
+             return res.status(400).json({ error: 'Body richiesta non valido' });
+        }
         const proposalsJSON = JSON.stringify(proposals);
 
-        // Usa l'admin del LEDGER
+        // L'identità 'org1admin' è usata per inviare la transazione
         const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
 
         await contract.submitTransaction('CreateElection', id, title, proposalsJSON);
@@ -206,7 +340,7 @@ app.post('/api/create-election', async (req, res) => {
         gateway.disconnect();
         res.status(201).json({ message: `Elezione ${id} creata con successo` });
     } catch (error) {
-        console.error(error);
+        console.error("Errore in /api/create-election:", error);
         const errorString = error.toString();
         if (errorString.includes('Accesso negato')) {
             return res.status(403).json({ error: errorString });
@@ -215,55 +349,122 @@ app.post('/api/create-election', async (req, res) => {
     }
 });
 
-app.post('/api/vote', async (req, res) => {
+// Ritorna lista di elezioni attive per cui non hai votato
+app.get('/api/active-elections-not-voted')
+
+
+// --- API PROTETTE (Votazione) ---
+
+/**
+ * [PROTETTO: TUTTI] Esprime un voto.
+ * L'identità (matricola) è presa dal TOKEN JWT, non dal body.
+ * Il voto è inviato come DATO TRANSITORIO per privacy.
+ */
+app.post('/api/vote', verifyToken, async (req, res) => {
     try {
-        const { voterID, electionID, proposal } = req.body;
-        if (!voterID || !electionID || !proposal) {
-            return res.status(400).json({ error: 'Body incompleto' });
+        const { electionID, proposal } = req.body;
+        
+        // SICUREZZA: Prendo la matricola dal token JWT, non dal body.
+        // Questo impedisce a un utente di votare per conto di un altro.
+        const voterID = req.user.matricola; 
+
+        if (!electionID || !proposal) {
+            return res.status(400).json({ error: 'electionID e proposal richiesti' });
         }
 
-        // Usa l'identità dell'ELETTORE
+        // Connettiamo come l'ELETTORE (la cui identità è nel token)
         const { gateway, contract } = await connectToGateway(voterID);
 
-        await contract.submitTransaction('CastVote', electionID, proposal);
+        // SICUREZZA PRIVACY: Usa Dati Transitori
+        // La scelta del voto non viene MAI scritta sul ledger.
+        const transaction = contract.createTransaction('CastVote');
+        transaction.setTransient({
+            vote_choice: Buffer.from(proposal)
+        });
+        
+        // Invia solo l'ID elezione come argomento pubblico
+        await transaction.submit(electionID);
 
         gateway.disconnect();
-        res.status(200).json({ message: `Voto di ${voterID} per ${proposal} registrato!` });
+        res.status(200).json({ message: `Voto di ${voterID} per ${proposal} registrato con successo!` });
     } catch (error) {
-        console.error(error);
+        console.error("Errore in /api/vote:", error);
         const errorString = error.toString();
+        // Ritorna errori "puliti" dal chaincode
         if (errorString.includes('ha già votato') || 
             errorString.includes('Accesso negato') ||
             errorString.includes('non trovata') ||
             errorString.includes('è chiusa') ||
             errorString.includes('non registrato')
             ) {
-            return res.status(403).json({ error: errorString });
+            return res.status(403).json({ error: errorString }); // 403 Forbidden
         }
         res.status(500).json({ error: errorString });
     }
 });
 
-app.get('/api/results/:electionID', async (req, res) => {
+/**
+ * [PROTETTO: TUTTI] Legge i risultati di un'elezione.
+ */
+app.get('/api/results/:electionID', verifyToken, async (req, res) => {
     try {
         const { electionID } = req.params;
+        
+        // L'identità dell'utente che ha fatto login è usata per la query
+        const queryUser = req.user.matricola; 
 
-        // Usa l'admin del LEDGER per le query
-        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        // Connettiamo come l'utente loggato
+        const { gateway, contract } = await connectToGateway(queryUser);
 
         const result = await contract.evaluateTransaction('GetResults', electionID);
 
         gateway.disconnect();
         res.status(200).json(JSON.parse(result.toString()));
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
+        console.error("Errore in /api/results:", error);
+        const errorString = error.toString();
+        // Gestisci l'errore se l'elezione è ancora aperta (come da nostra logica)
+        if (errorString.includes('è ancora aperta')) {
+            return res.status(403).json({ error: errorString });
+        }
+        res.status(500).json({ error: errorString });
     }
 });
 
-// --- Avvio Server ---
+/**
+ * [PROTETTO: ADMIN] Chiude un'elezione.
+ */
+app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
+    try {
+        const { electionID } = req.body;
+        if (!electionID) {
+            return res.status(400).json({ error: 'electionID richiesto' });
+        }
+
+        // Usa l'identità 'org1admin' per inviare la transazione
+        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+
+        await contract.submitTransaction('CloseElection', electionID);
+
+        gateway.disconnect();
+        res.status(200).json({ message: `Elezione ${electionID} chiusa con successo` });
+    } catch (error) {
+        console.error("Errore in /api/close-election:", error);
+        const errorString = error.toString();
+        if (errorString.includes('è già chiusa')) {
+            return res.status(409).json({ error: errorString }); // 409 Conflict
+        }
+        res.status(500).json({ error: errorString });
+    }
+});
+
+
+// --- 6. AVVIO SERVER ---
+
 app.listen(PORT, async () => {
     console.log(`🚀 Server API in ascolto su http://localhost:${PORT}`);
-    // All'avvio, iscrivi ENTRAMBI gli admin
+    
+    // All'avvio, assicurati che il wallet abbia le identità admin
+    // Questo è FONDAMENTALE per far funzionare il server.
     await enrollAdmins();
 });

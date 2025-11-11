@@ -1,3 +1,4 @@
+// voting.go (Versione Finale con Transient Data e Controlli di Sicurezza)
 package main
 
 import (
@@ -33,12 +34,10 @@ type Voter struct {
 // --- FUNZIONI AMMINISTRATORE ---
 
 // CreateElection: Crea una nuova elezione.
-// **SICUREZZA**: Solo un Admin può farlo.
 func (s *SmartContract) CreateElection(ctx contractapi.TransactionContextInterface, id string, title string, proposalsJSON string) error {
-	// **SECURITY CHECK 1: Richiede ruolo 'admin'**
 	isAdmin, err := checkAttribute(ctx, "hf.Type", "admin")
 	if err != nil || !isAdmin {
-		return fmt.Errorf("Accesso negato: solo un 'admin' può creare elezioni. %v", err)
+		return fmt.Errorf("Accesso negato: solo un 'admin' (hf.Type) può creare elezioni. %v", err)
 	}
 
 	var proposals []string
@@ -66,15 +65,12 @@ func (s *SmartContract) CreateElection(ctx contractapi.TransactionContextInterfa
 }
 
 // RegisterVoter: Abilita un elettore al voto.
-// **SICUREZZA**: Solo un Admin può farlo.
 func (s *SmartContract) RegisterVoter(ctx contractapi.TransactionContextInterface, voterID string) error {
-	// **SECURITY CHECK 2: Richiede ruolo 'admin'**
 	isAdmin, err := checkAttribute(ctx, "hf.Type", "admin")
 	if err != nil || !isAdmin {
-		return fmt.Errorf("Accesso negato: solo un 'admin' può registrare elettori. %v", err)
+		return fmt.Errorf("Accesso negato: solo un 'admin' (hf.Type) può registrare elettori. %v", err)
 	}
 
-	// Controlla se l'elettore esiste già
 	existing, err := ctx.GetStub().GetState(voterID)
 	if err != nil {
 		return err
@@ -95,13 +91,11 @@ func (s *SmartContract) RegisterVoter(ctx contractapi.TransactionContextInterfac
 
 // CloseElection: Chiude un'elezione.
 func (s *SmartContract) CloseElection(ctx contractapi.TransactionContextInterface, electionID string) error {
-	// **SECURITY CHECK 3: Richiede ruolo 'admin'**
 	isAdmin, err := checkAttribute(ctx, "hf.Type", "admin")
 	if err != nil || !isAdmin {
-		return fmt.Errorf("Accesso negato: solo un 'admin' può chiudere elezioni. %v", err)
+		return fmt.Errorf("Accesso negato: solo un 'admin' (hf.Type) può chiudere elezioni. %v", err)
 	}
 
-	// Recupera l'elezione
 	electionJSON, err := ctx.GetStub().GetState(electionID)
 	if err != nil || electionJSON == nil {
 		return fmt.Errorf("Elezione non trovata: %s", electionID)
@@ -109,31 +103,47 @@ func (s *SmartContract) CloseElection(ctx contractapi.TransactionContextInterfac
 	var election Election
 	json.Unmarshal(electionJSON, &election)
 
-	// Chiudi
-	election.IsOpen = false
+	if !election.IsOpen {
+		return fmt.Errorf("Elezione %s è già chiusa", electionID)
+	}
 
-	// Salva
+	election.IsOpen = false
 	electionJSONUpdate, _ := json.Marshal(election)
 	return ctx.GetStub().PutState(electionID, electionJSONUpdate)
 }
 
-// --- FUNZIONI ELETTORE ---
+// --- FUNZIONI ELETTORE (MODIFICATO) ---
 
-// CastVote: Il voto dell'elettore.
-// **SICUREZZA**: Prevenzione doppio voto e privacy.
-func (s *SmartContract) CastVote(ctx contractapi.TransactionContextInterface, electionID string, proposalName string) error {
+// CastVote ora legge i Dati Transitori per la privacy.
+// Nota che 'proposalName' è stato RIMOSSO dagli argomenti.
+func (s *SmartContract) CastVote(ctx contractapi.TransactionContextInterface, electionID string) error {
 	// **SECURITY CHECK 4: Richiede ruolo 'voter'**
 	isVoter, err := checkAttribute(ctx, "role", "voter")
 	if err != nil || !isVoter {
 		return fmt.Errorf("Accesso negato: solo un 'voter' può votare. %v", err)
 	}
 
-	// **SECURITY CHECK 5: L'identità è presa dal certificato, non passata come arg.**
-	// Questo impedisce a un utente di votare per un altro.
+	// **SECURITY CHECK 5: Identità dal certificato**
 	voterID, err := getVoterIDFromCertificate(ctx)
 	if err != nil {
 		return err
 	}
+
+	// --- LEGGI VOTO SEGRETO DAI DATI TRANSITORI ---
+	// Questo è il cuore della privacy del voto
+	transientMap, err := ctx.GetStub().GetTransient()
+	if err != nil {
+		return fmt.Errorf("Errore nel leggere i transient data: %v", err)
+	}
+
+	// Estrai il voto (che è in byte) dalla mappa privata
+	proposalBytes, ok := transientMap["vote_choice"]
+	if !ok {
+		// Se 'vote_choice' non è nella mappa, la richiesta è malformata
+		return fmt.Errorf("La proposta 'vote_choice' non è stata trovata nei transient data")
+	}
+	proposalName := string(proposalBytes)
+	// --- FINE LETTURA VOTO SEGRETO ---
 
 	// 1. Recupera l'elettore
 	voterJSON, err := ctx.GetStub().GetState(voterID)
@@ -181,9 +191,9 @@ func (s *SmartContract) CastVote(ctx contractapi.TransactionContextInterface, el
 	return ctx.GetStub().PutState(electionID, electionJSONUpdate)
 }
 
-// --- FUNZIONI PUBBLICHE (QUERY) ---
+// --- FUNZIONI PUBBLICHE (MODIFICATO) ---
 
-// GetResults: Query pubblica dei risultati
+// GetResults ora controlla se l'elezione è chiusa
 func (s *SmartContract) GetResults(ctx contractapi.TransactionContextInterface, electionID string) (*Election, error) {
 	electionJSON, err := ctx.GetStub().GetState(electionID)
 	if err != nil || electionJSON == nil {
@@ -192,10 +202,16 @@ func (s *SmartContract) GetResults(ctx contractapi.TransactionContextInterface, 
 	var election Election
 	json.Unmarshal(electionJSON, &election)
 
+	// **NUOVO SECURITY CHECK**
+	// Non mostrare i risultati se l'elezione è ancora aperta
+	if election.IsOpen {
+		return nil, fmt.Errorf("Impossibile vedere i risultati: l'elezione '%s' è ancora aperta", electionID)
+	}
+
 	return &election, nil
 }
 
-// --- HELPERS DI SICUREZZA ---
+// --- HELPERS DI SICUREZZA (Identici) ---
 
 // checkAttribute: Controlla se il client ha un attributo specifico
 func checkAttribute(ctx contractapi.TransactionContextInterface, attrName string, attrValue string) (bool, error) {
@@ -204,8 +220,6 @@ func checkAttribute(ctx contractapi.TransactionContextInterface, attrName string
 		return false, fmt.Errorf("Errore nel recuperare l'attributo %s: %v", attrName, err)
 	}
 	if !found {
-		// Se l'attributo non è trovato, loggalo per debug
-		// log.Printf("Attributo '%s' non trovato nel certificato", attrName)
 		return false, nil
 	}
 	return val == attrValue, nil
@@ -213,18 +227,17 @@ func checkAttribute(ctx contractapi.TransactionContextInterface, attrName string
 
 // getVoterIDFromCertificate: Recupera l'ID di iscrizione (Enrollment ID)
 func getVoterIDFromCertificate(ctx contractapi.TransactionContextInterface) (string, error) {
-	// Questo è il modo più pulito: usa l'attributo 'voterID'
 	voterID, found, err := ctx.GetClientIdentity().GetAttributeValue("voterID")
 	if err != nil {
 		return "", fmt.Errorf("Errore nel leggere attributo voterID: %v", err)
 	}
 	if !found {
-		// Se l'attributo 'voterID' non è nel certificato, blocca.
 		return "", fmt.Errorf("Attributo 'voterID' non trovato nel certificato. L'identità non è valida per il voto.")
 	}
 	return voterID, nil
 }
 
+// main: (Identico)
 func main() {
 	chaincode, err := contractapi.NewChaincode(&SmartContract{})
 	if err != nil {
