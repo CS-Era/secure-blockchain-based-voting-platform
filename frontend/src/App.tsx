@@ -1,18 +1,46 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AuthForm } from './components/AuthForm';
+import { AdminDashboard } from './components/AdminDashboard';
 import { ElectionsList } from './components/ElectionsList';
 import { VotingModal } from './components/VotingModal';
 import { ResultsModal } from './components/ResultsModal';
-import { LogOut, Vote } from 'lucide-react';
+import { supabase, Student } from './lib/supabase';
+import { LogOut, Vote, Settings } from 'lucide-react';
 
 function AppContent() {
   const { user, loading, signOut } = useAuth();
   const [votingElectionId, setVotingElectionId] = useState<string | null>(null);
   const [resultsElectionId, setResultsElectionId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminLoading, setAdminLoading] = useState(true);
 
-  if (loading) {
+  useEffect(() => {
+    if (user) {
+      checkAdminStatus();
+    }
+  }, [user]);
+
+  const checkAdminStatus = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('students')
+        .select('is_admin')
+        .eq('id', user?.id)
+        .single();
+
+      if (error) throw error;
+      setIsAdmin(data?.is_admin || false);
+    } catch (error) {
+      console.error('Error checking admin status:', error);
+      setIsAdmin(false);
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  if (loading || adminLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-blue-100 flex items-center justify-center">
         <div className="text-center">
@@ -40,6 +68,12 @@ function AppContent() {
                 <h1 className="text-2xl font-bold text-gray-900">Elezioni Studentesche</h1>
                 <p className="text-sm text-gray-600">{user.email}</p>
               </div>
+              {isAdmin && (
+                <span className="ml-4 flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-medium">
+                  <Settings className="w-4 h-4" />
+                  Admin
+                </span>
+              )}
             </div>
             <button
               onClick={() => signOut()}
@@ -53,16 +87,26 @@ function AppContent() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="mb-8">
-          <h2 className="text-3xl font-bold text-gray-900 mb-2">Le tue Elezioni</h2>
-          <p className="text-gray-600">Gestisci le tue votazioni e visualizza i risultati</p>
-        </div>
+        {isAdmin ? (
+          <AdminDashboard
+            onVote={(electionId) => setVotingElectionId(electionId)}
+            onViewResults={(electionId) => setResultsElectionId(electionId)}
+            refreshKey={refreshKey}
+          />
+        ) : (
+          <>
+            <div className="mb-8">
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">Le tue Elezioni</h2>
+              <p className="text-gray-600">Gestisci le tue votazioni e visualizza i risultati</p>
+            </div>
 
-        <ElectionsList
-          key={refreshKey}
-          onVote={(electionId) => setVotingElectionId(electionId)}
-          onViewResults={(electionId) => setResultsElectionId(electionId)}
-        />
+            <ElectionsList
+              key={refreshKey}
+              onVote={(electionId) => setVotingElectionId(electionId)}
+              onViewResults={(electionId) => setResultsElectionId(electionId)}
+            />
+          </>
+        )}
       </main>
 
       {votingElectionId && (
