@@ -237,6 +237,44 @@ func getVoterIDFromCertificate(ctx contractapi.TransactionContextInterface) (str
 	return voterID, nil
 }
 
+// GetAllElections: Restituisce tutte le elezioni (pubblico, senza risultati per sicurezza)
+func (s *SmartContract) GetAllElections(ctx contractapi.TransactionContextInterface) ([]*Election, error) {
+	// Iterator per tutti gli oggetti "election" nel ledger
+	resultsIterator, err := ctx.GetStub().GetStateByRange("", "")
+	if err != nil {
+		return nil, fmt.Errorf("Errore nel recupero delle elezioni: %v", err)
+	}
+	defer resultsIterator.Close()
+
+	var elections []*Election
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		var election Election
+		err = json.Unmarshal(queryResponse.Value, &election)
+		if err != nil {
+			return nil, err
+		}
+
+		// Filtra solo i docType "election"
+		if election.DocType == "election" {
+			// Copia senza risultati se l'elezione è aperta (privacy)
+			if election.IsOpen {
+				electionCopy := election
+				electionCopy.Results = nil
+				elections = append(elections, &electionCopy)
+			} else {
+				elections = append(elections, &election)
+			}
+		}
+	}
+
+	return elections, nil
+}
+
 // main: (Identico)
 func main() {
 	chaincode, err := contractapi.NewChaincode(&SmartContract{})

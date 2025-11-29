@@ -1,5 +1,5 @@
 import { Vote as VoteIcon, CheckCircle, Clock } from 'lucide-react';
-import { Election } from '../lib/supabase';
+import {Election} from "../api.ts";
 
 interface ElectionCardProps {
   election: Election;

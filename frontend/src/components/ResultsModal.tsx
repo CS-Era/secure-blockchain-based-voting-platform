@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { X, User, TrendingUp } from 'lucide-react';
-import { supabase, Candidate, Election } from '../lib/supabase';
 
 interface VoteCount {
   candidate_id: string;

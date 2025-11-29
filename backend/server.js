@@ -41,6 +41,9 @@ const MSP_ID = 'Org1MSP';
 const ccpPath = path.resolve(__dirname, '..', 'fabric-samples', 'test-network', 'organizations', 'peerOrganizations', 'org1.example.com', 'connection-org1.json');
 const walletPath = path.join(__dirname, 'wallet');
 
+// All'inizio del file server, dopo gli import
+
+
 // Check di sicurezza all'avvio: verifica che le variabili d'ambiente critiche siano caricate
 if (!ORG_ADMIN_USER || !ORG_ADMIN_PASS || !CA_REGISTRAR_USER || !CA_REGISTRAR_PASS || !DEFAULT_VOTER_PASS || !JWT_SECRET) {
     console.error('ERRORE CRITICO: Variabili d\'ambiente segrete mancanti.');
@@ -50,6 +53,15 @@ if (!ORG_ADMIN_USER || !ORG_ADMIN_PASS || !CA_REGISTRAR_USER || !CA_REGISTRAR_PA
 console.log(`✅ Variabili di environment caricate correttamente`);
 
 // --- 3. MIDDLEWARE DI SICUREZZA ---
+const cors = require('cors');
+
+// AGGIUNGI QUESTA CONFIGURAZIONE CORS
+app.use(cors({
+    origin: 'http://localhost:5173', // URL del tuo frontend Vite
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Permette al server di leggere JSON dal body delle richieste
 app.use(express.json());
@@ -97,6 +109,12 @@ const isAdmin = (req, res, next) => {
 };
 
 
+const isSuperAdmin = (req, res, next) => {
+    if (req.user.role !== 'super_admin') {
+        return res.status(403).json({ error: 'Accesso negato: questa azione richiede privilegi di amministratore.' });
+    }
+    next();
+};
 // --- 4. FUNZIONI HELPER (BLOCKCHAIN) ---
 
 /**
@@ -223,11 +241,60 @@ async function registerVoterOnBlockchain(voterID) {
 
 // --- 5. ENDPOINT DELL'API ---
 
-// --- API PUBBLICHE (Autenticazione) ---
+// --- API PROTETTE (Amministrazione) ---
+// ====================================
+// API PUBBLICHE (Autenticazione)
+// ====================================
+
+/**
+ * [PUBBLICO] Registrazione nuovo utente
+ */
+app.post('/api/register', async (req, res) => {
+    try {
+        const { matricola, password, fullName } = req.body;
+
+        if (!matricola || !password || !fullName) {
+            return res.status(400).json({ error: 'Matricola, password e nome completo richiesti' });
+        }
+
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+
+        // Inserisci nel DB
+        const result = await db.query(
+            'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1, $2, $3, $4) RETURNING id, matricola, role',
+            [matricola, passwordHash, fullName, 'student']
+        );
+
+        // Registra sulla blockchain
+        await registerVoterOnBlockchain(matricola);
+
+        // Genera token JWT
+        const payload = {
+            id: result.rows[0].id,
+            matricola: result.rows[0].matricola,
+            role: result.rows[0].role
+        };
+
+        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
+
+        res.status(201).json({
+            message: 'Registrazione completata con successo',
+            token: token,
+            role: result.rows[0].role
+        });
+
+    } catch (error) {
+        console.error("Errore in /api/register:", error);
+        if (error.code === '23505') {
+            return res.status(409).json({ error: 'Matricola già esistente' });
+        }
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
 
 /**
  * [PUBBLICO] Login
- * Prende matricola e password, restituisce un JWT se validi.
  */
 app.post('/api/login', async (req, res) => {
     try {
@@ -236,34 +303,26 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ error: 'Matricola e password richiesti' });
         }
 
-        // 1. Cerca l'utente nel DB
         const result = await db.query('SELECT * FROM users WHERE matricola = $1', [matricola]);
         const user = result.rows[0];
 
         if (!user) {
-            return res.status(401).json({ error: 'Credenziali non valide' }); // 401 Unauthorized
+            return res.status(401).json({ error: 'Credenziali non valide' });
         }
 
-        // 2. Compara la password fornita con l'hash nel DB
-        // SICUREZZA: bcrypt.compare previene i "Timing Attacks"
         const isMatch = await bcrypt.compare(password, user.password_hash);
 
         if (!isMatch) {
-            return res.status(401).json({ error: 'Credenziali non valide' }); // 401 Unauthorized
+            return res.status(401).json({ error: 'Credenziali non valide' });
         }
 
-        // 3. Credenziali valide! Genera il token JWT
         const payload = {
             id: user.id,
             matricola: user.matricola,
-            role: user.role // 'student' o 'admin'
+            role: user.role
         };
 
-        const token = jwt.sign(
-            payload,
-            JWT_SECRET,
-            { expiresIn: '1h' } // Il token scade dopo 1 ora
-        );
+        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
 
         res.json({
             message: 'Login effettuato con successo',
@@ -277,62 +336,100 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-
-// --- API PROTETTE (Amministrazione) ---
-
 /**
- * [PROTETTO: ADMIN] Crea un nuovo utente (studente o admin) nel DB
- * e crea la sua identità sulla blockchain.
+ * [PRIVATO] Ottieni tutti gli studenti
  */
-app.post('/api/admin/create-user', verifyToken, isAdmin, async (req, res) => {
+app.get('/api/students', async (req, res) => {
     try {
-        const { matricola, password, role } = req.body;
-        if (!matricola || !password || !role) {
-            return res.status(400).json({ error: 'Matricola, password e ruolo richiesti' });
-        }
-        if (role !== 'student' && role !== 'admin') {
-            return res.status(400).json({ error: 'Ruolo non valido. Usare "student" o "admin".' });
-        }
-
-        // SICUREZZA: Genera HASH e SALT
-        const saltRounds = 10;
-        const passwordHash = await bcrypt.hash(password, saltRounds);
-
-        // 1. Inserisci l'utente nel DB (PostgreSQL)
         const result = await db.query(
-            'INSERT INTO users (matricola, password_hash, role) VALUES ($1, $2, $3) RETURNING id, matricola, role',
-            [matricola, passwordHash, role]
+            'SELECT id, matricola, full_name FROM users WHERE role = $1 and state = true',
+            ['student']
         );
-        
-        // 2. Crea l'identità sulla Blockchain (CA + Wallet + Ledger)
-        await registerVoterOnBlockchain(matricola);
 
-        res.status(201).json({
-            message: 'Utente creato con successo (DB e Blockchain)',
-            user: result.rows[0]
+        res.json({
+            count: result.rows.length,
+            students: result.rows
         });
 
     } catch (error) {
-        console.error("Errore in /api/admin/create-user:", error);
-        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
-            return res.status(409).json({ error: 'Matricola già esistente' });
-        }
+        console.error("Errore in GET /api/students:", error);
         res.status(500).json({ error: 'Errore interno del server' });
     }
 });
 
+// ====================================
+// API PROTETTE - ELEZIONI
+// ====================================
+
 /**
- * [PROTETTO: ADMIN] Crea una nuova elezione.
+ * [PROTETTO: TUTTI] Ritorna lista di tutte le elezioni
+ */
+app.get('/api/elections', verifyToken, async (req, res) => {
+    try {
+        const voterID = req.user.matricola;
+        const { gateway, contract } = await connectToGateway(voterID);
+
+        const result = await contract.evaluateTransaction('GetAllElections');
+
+        gateway.disconnect();
+        res.status(200).json(JSON.parse(result.toString()));
+    } catch (error) {
+        console.error("Errore in /api/elections:", error);
+        res.status(500).json({ error: error.toString() });
+    }
+});
+
+/**
+ * [PROTETTO: TUTTI] Ottiene i dettagli di una singola elezione
+ */
+app.get('/api/election/:electionID', verifyToken, async (req, res) => {
+    try {
+        const { electionID } = req.params;
+        const voterID = req.user.matricola;
+
+        const { gateway, contract } = await connectToGateway(voterID);
+
+        const result = await contract.evaluateTransaction('GetElection', electionID);
+
+        gateway.disconnect();
+        res.status(200).json(JSON.parse(result.toString()));
+    } catch (error) {
+        console.error("Errore in /api/election:", error);
+        res.status(500).json({ error: error.toString() });
+    }
+});
+
+/**
+ * [PROTETTO: TUTTI] Verifica se l'utente ha votato in un'elezione
+ */
+app.get('/api/has-voted/:electionID', verifyToken, async (req, res) => {
+    try {
+        const { electionID } = req.params;
+        const voterID = req.user.matricola;
+
+        const { gateway, contract } = await connectToGateway(voterID);
+
+        const result = await contract.evaluateTransaction('HasVoted', electionID, voterID);
+
+        gateway.disconnect();
+        res.status(200).json({ hasVoted: result.toString() === 'true' });
+    } catch (error) {
+        console.error("Errore in /api/has-voted:", error);
+        res.status(500).json({ error: error.toString() });
+    }
+});
+
+/**
+ * [PROTETTO: ADMIN] Crea una nuova elezione
  */
 app.post('/api/create-election', verifyToken, isAdmin, async (req, res) => {
     try {
         const { id, title, proposals } = req.body;
         if (!id || !title || !proposals || !Array.isArray(proposals)) {
-             return res.status(400).json({ error: 'Body richiesta non valido' });
+            return res.status(400).json({ error: 'Body richiesta non valido' });
         }
         const proposalsJSON = JSON.stringify(proposals);
 
-        // L'identità 'org1admin' è usata per inviare la transazione
         const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
 
         await contract.submitTransaction('CreateElection', id, title, proposalsJSON);
@@ -349,40 +446,25 @@ app.post('/api/create-election', verifyToken, isAdmin, async (req, res) => {
     }
 });
 
-// Ritorna lista di elezioni attive per cui non hai votato
-app.get('/api/active-elections-not-voted')
-
-
-// --- API PROTETTE (Votazione) ---
-
 /**
- * [PROTETTO: TUTTI] Esprime un voto.
- * L'identità (matricola) è presa dal TOKEN JWT, non dal body.
- * Il voto è inviato come DATO TRANSITORIO per privacy.
+ * [PROTETTO: TUTTI] Esprime un voto
  */
 app.post('/api/vote', verifyToken, async (req, res) => {
     try {
         const { electionID, proposal } = req.body;
-        
-        // SICUREZZA: Prendo la matricola dal token JWT, non dal body.
-        // Questo impedisce a un utente di votare per conto di un altro.
-        const voterID = req.user.matricola; 
+        const voterID = req.user.matricola;
 
         if (!electionID || !proposal) {
             return res.status(400).json({ error: 'electionID e proposal richiesti' });
         }
 
-        // Connettiamo come l'ELETTORE (la cui identità è nel token)
         const { gateway, contract } = await connectToGateway(voterID);
 
-        // SICUREZZA PRIVACY: Usa Dati Transitori
-        // La scelta del voto non viene MAI scritta sul ledger.
         const transaction = contract.createTransaction('CastVote');
         transaction.setTransient({
             vote_choice: Buffer.from(proposal)
         });
-        
-        // Invia solo l'ID elezione come argomento pubblico
+
         await transaction.submit(electionID);
 
         gateway.disconnect();
@@ -390,30 +472,26 @@ app.post('/api/vote', verifyToken, async (req, res) => {
     } catch (error) {
         console.error("Errore in /api/vote:", error);
         const errorString = error.toString();
-        // Ritorna errori "puliti" dal chaincode
-        if (errorString.includes('ha già votato') || 
+        if (errorString.includes('ha già votato') ||
             errorString.includes('Accesso negato') ||
             errorString.includes('non trovata') ||
             errorString.includes('è chiusa') ||
             errorString.includes('non registrato')
-            ) {
-            return res.status(403).json({ error: errorString }); // 403 Forbidden
+        ) {
+            return res.status(403).json({ error: errorString });
         }
         res.status(500).json({ error: errorString });
     }
 });
 
 /**
- * [PROTETTO: TUTTI] Legge i risultati di un'elezione.
+ * [PROTETTO: TUTTI] Legge i risultati di un'elezione
  */
 app.get('/api/results/:electionID', verifyToken, async (req, res) => {
     try {
         const { electionID } = req.params;
-        
-        // L'identità dell'utente che ha fatto login è usata per la query
-        const queryUser = req.user.matricola; 
+        const queryUser = req.user.matricola;
 
-        // Connettiamo come l'utente loggato
         const { gateway, contract } = await connectToGateway(queryUser);
 
         const result = await contract.evaluateTransaction('GetResults', electionID);
@@ -423,7 +501,6 @@ app.get('/api/results/:electionID', verifyToken, async (req, res) => {
     } catch (error) {
         console.error("Errore in /api/results:", error);
         const errorString = error.toString();
-        // Gestisci l'errore se l'elezione è ancora aperta (come da nostra logica)
         if (errorString.includes('è ancora aperta')) {
             return res.status(403).json({ error: errorString });
         }
@@ -432,7 +509,7 @@ app.get('/api/results/:electionID', verifyToken, async (req, res) => {
 });
 
 /**
- * [PROTETTO: ADMIN] Chiude un'elezione.
+ * [PROTETTO: ADMIN] Chiude un'elezione
  */
 app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
     try {
@@ -441,7 +518,6 @@ app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
             return res.status(400).json({ error: 'electionID richiesto' });
         }
 
-        // Usa l'identità 'org1admin' per inviare la transazione
         const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
 
         await contract.submitTransaction('CloseElection', electionID);
@@ -452,12 +528,58 @@ app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
         console.error("Errore in /api/close-election:", error);
         const errorString = error.toString();
         if (errorString.includes('è già chiusa')) {
-            return res.status(409).json({ error: errorString }); // 409 Conflict
+            return res.status(409).json({ error: errorString });
         }
         res.status(500).json({ error: errorString });
     }
 });
 
+/**
+ * [PROTETTO: ADMIN] Crea un nuovo utente (studente, admin o super_admin) nel DB
+ * e crea la sua identità sulla blockchain.
+ * NOTA: Solo super_admin può creare altri admin o super_admin
+ */
+app.post('/api/admin/create-user', verifyToken, isAdmin, async (req, res) => {
+    try {
+        const { matricola, password, role, fullName } = req.body;
+        if (!matricola || !password || !role) {
+            return res.status(400).json({ error: 'Matricola, password e ruolo richiesti' });
+        }
+        if (role !== 'student' && role !== 'admin' && role !== 'super_admin') {
+            return res.status(400).json({ error: 'Ruolo non valido. Usare "student", "admin" o "super_admin".' });
+        }
+
+        // SICUREZZA: Solo super_admin può creare admin o super_admin
+        if ((role === 'admin' || role === 'super_admin') && req.user.role !== 'super_admin') {
+            return res.status(403).json({ error: 'Solo i super admin possono creare admin o super admin' });
+        }
+
+        // SICUREZZA: Genera HASH e SALT
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+
+        // 1. Inserisci l'utente nel DB (PostgreSQL)
+        const result = await db.query(
+            'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1, $2, $3, $4) RETURNING id, matricola, full_name, role',
+            [matricola, passwordHash, fullName || 'Utente', role]
+        );
+
+        // 2. Crea l'identità sulla Blockchain (CA + Wallet + Ledger)
+        await registerVoterOnBlockchain(matricola);
+
+        res.status(201).json({
+            message: 'Utente creato con successo (DB e Blockchain)',
+            user: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error("Errore in /api/admin/create-user:", error);
+        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
+            return res.status(409).json({ error: 'Matricola già esistente' });
+        }
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
 
 // --- 6. AVVIO SERVER ---
 
