@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, User, TrendingUp } from 'lucide-react';
+import {Candidate, Election} from "../api.ts";
 
 interface VoteCount {
   candidate_id: string;
@@ -25,6 +26,70 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
   useEffect(() => {
     loadResults();
   }, [electionId]);
+
+  useEffect(() => {
+    loadFakeResults();
+  }, [electionId]);
+
+  const loadFakeResults = async () => {
+    try {
+      // Simuliamo l'elezione corrente
+      const fakeElection = {
+        id: electionId,
+        title: 'Elezione del Presidente',
+        description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
+        start_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 giorni fa
+        end_date: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),   // 1 giorno fa
+        isOpen: false
+      };
+
+      // Simuliamo i candidati
+      const fakeCandidates = [
+        { id: 'cand-1', name: 'Mario Rossi', description: 'Studente di ingegneria' },
+        { id: 'cand-2', name: 'Luigi Bianchi', description: 'Studente di economia' },
+        { id: 'cand-3', name: 'Anna Verdi', description: 'Studente di matematica' },
+      ];
+
+      // Simuliamo i voti
+      const fakeVotes = [
+        { candidate_id: 'cand-1' },
+        { candidate_id: 'cand-2' },
+        { candidate_id: 'cand-1' },
+        { candidate_id: 'cand-3' },
+        { candidate_id: 'cand-1' },
+      ];
+
+      setElection(fakeElection);
+
+      // Conta i voti per candidato
+      const voteCounts = new Map<string, number>();
+      fakeVotes.forEach(vote => {
+        voteCounts.set(vote.candidate_id, (voteCounts.get(vote.candidate_id) || 0) + 1);
+      });
+
+      const total = fakeVotes.length;
+      setTotalVotes(total);
+
+      // Costruisci i risultati dei candidati
+      const candidateResults: CandidateResult[] = fakeCandidates.map(candidate => {
+        const voteCount = voteCounts.get(candidate.id) || 0;
+        const percentage = total > 0 ? (voteCount / total) * 100 : 0;
+        return {
+          ...candidate,
+          voteCount,
+          percentage
+        };
+      }).sort((a, b) => b.voteCount - a.voteCount);
+
+      setResults(candidateResults);
+
+    } catch (error) {
+      console.error('Error loading results:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
 
   const loadResults = async () => {
     try {
@@ -82,78 +147,93 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
   const winner = results.length > 0 ? results[0] : null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-      <div className="bg-white rounded-2xl p-8 max-w-3xl w-full my-8">
-        <div className="flex items-start justify-between mb-6">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">{election?.title}</h2>
-            <p className="text-gray-600">Risultati finali - {totalVotes} {totalVotes === 1 ? 'voto' : 'voti'} totali</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 transition"
-          >
-            <X className="w-6 h-6" />
-          </button>
-        </div>
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
 
-        {winner && totalVotes > 0 && (
-          <div className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-6 mb-8 text-white">
-            <div className="flex items-center gap-3 mb-2">
-              <TrendingUp className="w-6 h-6" />
-              <h3 className="text-xl font-bold">Vincitore</h3>
-            </div>
-            <p className="text-2xl font-bold mb-1">{winner.name}</p>
-            <p className="text-blue-100">{winner.voteCount} {winner.voteCount === 1 ? 'voto' : 'voti'} ({winner.percentage.toFixed(1)}%)</p>
-          </div>
-        )}
-
-        {totalVotes === 0 ? (
-          <div className="text-center py-12">
-            <p className="text-gray-600 text-lg">Nessun voto registrato per questa elezione</p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold text-gray-900 mb-4">Tutti i Candidati</h3>
-            {results.map((candidate, index) => (
-              <div key={candidate.id} className="bg-gray-50 rounded-xl p-6">
-                <div className="flex items-start gap-4 mb-4">
-                  <div className="w-12 h-12 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
-                    {index + 1}
-                  </div>
-                  <div className="flex-1">
-                    <h4 className="text-lg font-bold text-gray-900 mb-1">{candidate.name}</h4>
-                    <p className="text-gray-600 text-sm mb-3">{candidate.description}</p>
-                    <div className="flex items-center gap-4">
-                      <div className="flex-1 bg-gray-200 rounded-full h-3 overflow-hidden">
-                        <div
-                          className="bg-blue-600 h-full rounded-full transition-all duration-500"
-                          style={{ width: `${candidate.percentage}%` }}
-                        />
-                      </div>
-                      <div className="text-right min-w-[120px]">
-                        <p className="text-lg font-bold text-gray-900">
-                          {candidate.voteCount} {candidate.voteCount === 1 ? 'voto' : 'voti'}
-                        </p>
-                        <p className="text-sm text-gray-600">{candidate.percentage.toFixed(1)}%</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+          {/* HEADER FISSO */}
+          <div className="flex flex-col p-6 border-b border-gray-200 flex-none space-y-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">{election?.title}</h2>
+                <p className="text-gray-600">
+                  Risultati finali - {totalVotes} {totalVotes === 1 ? 'voto' : 'voti'} totali
+                </p>
               </div>
-            ))}
-          </div>
-        )}
+              <button
+                  onClick={onClose}
+                  className="text-gray-400 hover:text-gray-600 transition"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
 
-        <div className="mt-8">
-          <button
-            onClick={onClose}
-            className="w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-3 rounded-lg transition"
-          >
-            Chiudi
-          </button>
+            {/* BOX VINCITORE */}
+            {winner && totalVotes > 0 && (
+                <div className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-4 text-white">
+                  <div className="flex items-center gap-3 mb-2">
+                    <TrendingUp className="w-6 h-6" />
+                    <h3 className="text-xl font-bold">Vincitore</h3>
+                  </div>
+                  <p className="text-2xl font-bold mb-1">{winner.name}</p>
+                  <p className="text-blue-100">
+                    {winner.voteCount} {winner.voteCount === 1 ? 'voto' : 'voti'} ({winner.percentage.toFixed(1)}%)
+                  </p>
+                </div>
+            )}
+          </div>
+
+          {/* CONTENUTO SCROLLABILE */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            {totalVotes === 0 ? (
+                <div className="text-center py-12">
+                  <p className="text-gray-600 text-lg">Nessun voto registrato per questa elezione</p>
+                </div>
+            ) : (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-bold text-gray-900 mb-4">Tutti i Candidati</h3>
+                  {results.map((candidate, index) => (
+                      <div key={candidate.id} className="bg-gray-50 rounded-xl p-6">
+                        <div className="flex items-start gap-4 mb-4">
+                          <div className="w-12 h-12 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
+                            {index + 1}
+                          </div>
+                          <div className="flex-1">
+                            <h4 className="text-lg font-bold text-gray-900 mb-1">{candidate.name}</h4>
+                            <p className="text-gray-600 text-sm mb-3">{candidate.description}</p>
+                            <div className="flex items-center gap-4">
+                              <div className="flex-1 bg-gray-200 rounded-full h-3 overflow-hidden">
+                                <div
+                                    className="bg-blue-600 h-full rounded-full transition-all duration-500"
+                                    style={{ width: `${candidate.percentage}%` }}
+                                />
+                              </div>
+                              <div className="text-right min-w-[120px]">
+                                <p className="text-lg font-bold text-gray-900">
+                                  {candidate.voteCount} {candidate.voteCount === 1 ? 'voto' : 'voti'}
+                                </p>
+                                <p className="text-sm text-gray-600">{candidate.percentage.toFixed(1)}%</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                  ))}
+                </div>
+            )}
+          </div>
+
+          {/* FOOTER FISSO */}
+          <div className="p-6 border-t border-gray-200 flex-none">
+            <button
+                onClick={onClose}
+                className="w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-3 rounded-lg transition"
+            >
+              Chiudi
+            </button>
+          </div>
         </div>
       </div>
-    </div>
   );
+
+
 };

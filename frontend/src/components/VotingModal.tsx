@@ -19,8 +19,40 @@ export const VotingModal = ({ electionId, onClose, onVoteSuccess }: VotingModalP
   const { user, token } = useAuth();
 
   useEffect(() => {
-    loadElectionData();
+    loadFakeElectionData();
   }, [electionId]);
+
+  const loadFakeElectionData = async () => {
+    try {
+      // Dati fittizi per l'elezione
+      const fakeElection = {
+        id: electionId,
+        title: 'Elezione del Presidente',
+        description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
+        start_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 giorni fa
+        end_date: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),   // tra 2 giorni
+      };
+
+      // Dati fittizi per i candidati
+      const fakeCandidates = [
+        { id: 'cand-1', name: 'Mario Rossi', description: 'Studente di ingegneria' },
+        { id: 'cand-2', name: 'Luigi Bianchi', description: 'Studente di economia' },
+        { id: 'cand-3', name: 'Anna Verdi', description: 'Studente di matematica' },
+      ];
+
+      // Simula un piccolo delay come se fosse fetch
+      await new Promise(res => setTimeout(res, 500));
+
+      setElection(fakeElection);
+      setCandidates(fakeCandidates);
+
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : 'Errore nel caricamento dei dati');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadElectionData = async () => {
     try {

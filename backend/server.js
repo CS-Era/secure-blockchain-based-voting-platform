@@ -57,7 +57,7 @@ const cors = require('cors');
 
 // AGGIUNGI QUESTA CONFIGURAZIONE CORS
 app.use(cors({
-    origin: 'http://localhost:5173', // URL del tuo frontend Vite
+    origin: 'http://localhost:5174', // URL del tuo frontend Vite
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
@@ -87,9 +87,9 @@ const verifyToken = (req, res, next) => {
             // 403 Forbidden (Autenticato ma token non valido/scaduto)
             return res.status(403).json({ error: 'Token non valido o scaduto.' });
         }
-        
+
         // Il token è valido. Allega i dati dell'utente alla richiesta
-        req.user = user; 
+        req.user = user;
         next(); // Prosegui alla funzione dell'endpoint
     });
 };
@@ -170,7 +170,7 @@ async function connectToGateway(identityName) {
     if (!identity) {
         throw new Error(`Identità '${identityName}' non trovata nel wallet locale. Assicurati che l'utente sia stato registrato.`);
     }
-    
+
     const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
     const gateway = new Gateway();
     await gateway.connect(ccp, {
@@ -178,7 +178,7 @@ async function connectToGateway(identityName) {
         identity: identityName,
         discovery: { enabled: true, asLocalhost: true }
     });
-    
+
     const network = await gateway.getNetwork(CHANNEL_NAME);
     const contract = network.getContract(CONTRACT_NAME);
     return { gateway, contract };
@@ -238,55 +238,113 @@ async function registerVoterOnBlockchain(voterID) {
     return `Elettore ${voterID} registrato con successo (CA, Wallet, Ledger).`;
 }
 
+function parseBooleanResult(buf) {
+    if (!buf) return false;
+    const s = buf.toString();
+    // prova a fare JSON.parse (gestisce true/false booleani e stringhe "true"/"false")
+    try {
+        const parsed = JSON.parse(s);
+        if (typeof parsed === 'boolean') return parsed;
+        if (typeof parsed === 'string') return parsed === 'true' || parsed === '1';
+    } catch (e) {
+        // JSON.parse ha fallito: valuta come stringa semplice
+        return s === 'true' || s === '1';
+    }
+    return false;
+}
+
+async function isVoterOnLedger(matricola) {
+    if (!matricola) throw new Error('matricola richiesta');
+
+    // opzionale: verifica wallet locale (solo per debug)
+    try {
+        const wallet = await Wallets.newFileSystemWallet(walletPath);
+        const id = await wallet.get(ORG_ADMIN_USER);
+        if (!id) {
+            // non throw qui: preferisco lasciare che connectToGateway fallisca con più info
+            console.warn(`Attenzione: identità ${ORG_ADMIN_USER} non trovata nel wallet ${walletPath}`);
+        }
+    } catch (e) {
+        console.warn('Impossibile accedere al wallet locale:', e.message || e);
+    }
+
+    const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+    try {
+        // Primary: funzione che ritorna boolean (IsVoterRegistered)
+        try {
+            const ledgerResult = await contract.evaluateTransaction('IsVoterRegistered', matricola);
+            return parseBooleanResult(ledgerResult);
+        } catch (errA) {
+            // Se IsVoterRegistered non esiste o fallisce, fallback a ReadVoter (che ritorna dati)
+            try {
+                const readRes = await contract.evaluateTransaction('ReadVoter', matricola);
+                // se ReadVoter restituisce un buffer non vuoto => esiste
+                if (!readRes) return false;
+                const s = readRes.toString();
+                return s.length > 0;
+            } catch (errB) {
+                // entrambe le strade fallite: rilancia l'errore originale per debugging
+                const e = new Error(`Errore verificando ledger: ${errA.message || errA}`);
+                e.cause = errA;
+                throw e;
+            }
+        }
+    } finally {
+        try { gateway.disconnect(); } catch (e) { /* ignore */ }
+    }
+}
 
 // --- 5. ENDPOINT DELL'API ---
-
-// --- API PROTETTE (Amministrazione) ---
-// ====================================
-// API PUBBLICHE (Autenticazione)
-// ====================================
-
 /**
- * [PUBBLICO] Registrazione nuovo utente
+ * [PROTETTO: SUPERADMIN] Crea un nuovo utente (studente, admin o super_admin) nel DB
+ * e crea la sua identità sulla blockchain.
+ * NOTA: Solo super_admin può creare altri admin o super_admin
  */
-app.post('/api/register', async (req, res) => {
+app.post('/api/superadmin/create-user', verifyToken, isSuperAdmin, async (req, res) => {
     try {
-        const { matricola, password, fullName } = req.body;
-
-        if (!matricola || !password || !fullName) {
-            return res.status(400).json({ error: 'Matricola, password e nome completo richiesti' });
+        const { matricola, password, role, fullName } = req.body;
+        if (!matricola || !password || !role || !fullName) {
+            return res.status(400).json({ error: 'Matricola, password, nome completo e ruolo richiesti' });
+        }
+        if (role !== 'student' && role !== 'admin' && role !== 'super_admin') {
+            return res.status(400).json({ error: 'Ruolo non valido. Usare "student", "admin" o "super_admin".' });
         }
 
+        // SICUREZZA: Solo super_admin può creare admin o super_admin
+        if (req.user.role !== 'super_admin') {
+            return res.status(403).json({ error: 'Solo i super admin possono creare un nuovo elettore!' });
+        }
+
+        // SICUREZZA: Genera HASH e SALT
         const saltRounds = 10;
         const passwordHash = await bcrypt.hash(password, saltRounds);
 
-        // Inserisci nel DB
-        const result = await db.query(
-            'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1, $2, $3, $4) RETURNING id, matricola, role',
-            [matricola, passwordHash, fullName, 'student']
-        );
+        try {
+            await db.query('BEGIN');
+            const insert = await db.query(
+                'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1,$2,$3,$4) RETURNING id, matricola, full_name, role',
+                [matricola, passwordHash, fullName, role]
+            );
 
-        // Registra sulla blockchain
-        await registerVoterOnBlockchain(matricola);
+            try {
+                await registerVoterOnBlockchain(matricola);
+            } catch (bcErr) {
+                await db.query('ROLLBACK');
+                console.error('BC registration failed, rollback DB insert:', bcErr);
+                return res.status(500).json({ error: 'Registrazione blockchain fallita — operazione annullata' });
+            }
 
-        // Genera token JWT
-        const payload = {
-            id: result.rows[0].id,
-            matricola: result.rows[0].matricola,
-            role: result.rows[0].role
-        };
+            await db.query('COMMIT');
+            res.status(201).json({ message: 'Utente creato con successo (DB e Blockchain)', user: insert.rows[0] });
 
-        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
-
-        res.status(201).json({
-            message: 'Registrazione completata con successo',
-            token: token,
-            role: result.rows[0].role
-        });
+        } catch (err) {
+            await db.query('ROLLBACK').catch(()=>{});
+            // gestione errori (unique_violation ecc.)
+        }
 
     } catch (error) {
-        console.error("Errore in /api/register:", error);
-        if (error.code === '23505') {
+        console.error("Errore in /api/admin/create-user:", error);
+        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
             return res.status(409).json({ error: 'Matricola già esistente' });
         }
         res.status(500).json({ error: 'Errore interno del server' });
@@ -311,10 +369,22 @@ app.post('/api/login', async (req, res) => {
         }
 
         const isMatch = await bcrypt.compare(password, user.password_hash);
-
         if (!isMatch) {
             return res.status(401).json({ error: 'Credenziali non valide' });
         }
+
+        // --- CHECK SU BLOCKCHAIN ---
+        /*try {
+            const existsOnLedger = await isVoterOnLedger(matricola);
+            if (!existsOnLedger) {
+                // scelta di policy: 401 è coerente con "credenziali non valide"
+                return res.status(401).json({ error: 'Credenziali non valide' });
+            }
+        } catch (bcErr) {
+            console.error('Errore verificando ledger:', bcErr);
+            // comportamento consigliato: fallire safe o permettere login? Qui blocco per sicurezza
+            return res.status(500).json({ error: 'Impossibile verificare stato su blockchain' });
+        }*/
 
         const payload = {
             id: user.id,
@@ -326,7 +396,7 @@ app.post('/api/login', async (req, res) => {
 
         res.json({
             message: 'Login effettuato con successo',
-            token: token,
+            token,
             role: user.role
         });
 
@@ -335,6 +405,11 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ error: 'Errore interno del server' });
     }
 });
+
+
+// ====================================
+// API PROTETTE - ELEZIONI
+// ====================================
 
 /**
  * [PRIVATO] Ottieni tutti gli studenti
@@ -356,10 +431,6 @@ app.get('/api/students', async (req, res) => {
         res.status(500).json({ error: 'Errore interno del server' });
     }
 });
-
-// ====================================
-// API PROTETTE - ELEZIONI
-// ====================================
 
 /**
  * [PROTETTO: TUTTI] Ritorna lista di tutte le elezioni
@@ -531,53 +602,6 @@ app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
             return res.status(409).json({ error: errorString });
         }
         res.status(500).json({ error: errorString });
-    }
-});
-
-/**
- * [PROTETTO: ADMIN] Crea un nuovo utente (studente, admin o super_admin) nel DB
- * e crea la sua identità sulla blockchain.
- * NOTA: Solo super_admin può creare altri admin o super_admin
- */
-app.post('/api/admin/create-user', verifyToken, isAdmin, async (req, res) => {
-    try {
-        const { matricola, password, role, fullName } = req.body;
-        if (!matricola || !password || !role) {
-            return res.status(400).json({ error: 'Matricola, password e ruolo richiesti' });
-        }
-        if (role !== 'student' && role !== 'admin' && role !== 'super_admin') {
-            return res.status(400).json({ error: 'Ruolo non valido. Usare "student", "admin" o "super_admin".' });
-        }
-
-        // SICUREZZA: Solo super_admin può creare admin o super_admin
-        if ((role === 'admin' || role === 'super_admin') && req.user.role !== 'super_admin') {
-            return res.status(403).json({ error: 'Solo i super admin possono creare admin o super admin' });
-        }
-
-        // SICUREZZA: Genera HASH e SALT
-        const saltRounds = 10;
-        const passwordHash = await bcrypt.hash(password, saltRounds);
-
-        // 1. Inserisci l'utente nel DB (PostgreSQL)
-        const result = await db.query(
-            'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1, $2, $3, $4) RETURNING id, matricola, full_name, role',
-            [matricola, passwordHash, fullName || 'Utente', role]
-        );
-
-        // 2. Crea l'identità sulla Blockchain (CA + Wallet + Ledger)
-        await registerVoterOnBlockchain(matricola);
-
-        res.status(201).json({
-            message: 'Utente creato con successo (DB e Blockchain)',
-            user: result.rows[0]
-        });
-
-    } catch (error) {
-        console.error("Errore in /api/admin/create-user:", error);
-        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
-            return res.status(409).json({ error: 'Matricola già esistente' });
-        }
-        res.status(500).json({ error: 'Errore interno del server' });
     }
 });
 

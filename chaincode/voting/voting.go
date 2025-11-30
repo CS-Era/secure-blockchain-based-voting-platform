@@ -89,6 +89,24 @@ func (s *SmartContract) RegisterVoter(ctx contractapi.TransactionContextInterfac
 	return ctx.GetStub().PutState(voterID, voterJSON)
 }
 
+// IsVoterRegistered: Controlla abilitazione di un elettore al voto.
+func (s *SmartContract) IsVoterRegistered(ctx contractapi.TransactionContextInterface, voterID string) (bool, error) {
+    if voterID == "" {
+        return false, fmt.Errorf("voterID non può essere vuoto")
+    }
+
+    existing, err := ctx.GetStub().GetState(voterID)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		return true, nil
+	}else{
+		return false, fmt.Errorf("Elettore %s già registrato", voterID)
+	}
+}
+
+
 // CloseElection: Chiude un'elezione.
 func (s *SmartContract) CloseElection(ctx contractapi.TransactionContextInterface, electionID string) error {
 	isAdmin, err := checkAttribute(ctx, "hf.Type", "admin")

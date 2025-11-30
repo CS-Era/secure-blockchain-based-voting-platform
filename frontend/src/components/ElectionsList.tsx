@@ -28,8 +28,59 @@ export const ElectionsList = ({ onVote, onViewResults }: ElectionsListProps) => 
   const { token } = useAuth();
 
   useEffect(() => {
-    loadElections();
+    loadFakeElections();
   }, [token]);
+
+
+  const loadFakeElections = async () => {
+    try {
+      // Dati fittizi
+      const fakeData: Election[] = [
+        {
+          id: 'election-1',
+          title: 'Elezione del Presidente',
+          description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
+          proposals: [
+            { name: 'Mario Rossi', description: 'Studente di ingegneria' },
+            { name: 'Luigi Bianchi', description: 'Studente di economia' },
+          ],
+          isOpen: true,
+          status: 'open',
+          start_date: new Date().toISOString(),
+          end_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 giorni dopo
+        },
+        {
+          id: 'election-2',
+          title: 'Elezione Rappresentante Classe',
+          description: 'Elezione per il rappresentante della classe 4B',
+          proposals: [
+            { name: 'Anna Verdi', description: 'Studente di matematica' },
+            { name: 'Paolo Neri', description: 'Studente di fisica' },
+          ],
+          isOpen: false,
+          status: 'closed',
+          start_date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 giorni fa
+          end_date: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString(), // 4 giorni fa
+        },
+      ];
+
+      // Trasforma i dati se serve (come facevi prima)
+      const transformedElections: Election[] = fakeData.map(e => ({
+        ...e,
+        proposals: e.proposals || [],
+      }));
+
+      setElections(transformedElections);
+
+      // Se avevi bisogno di caricare lo stato dei voti, puoi simulare anche quello
+      // await loadVotesStatus(transformedElections);
+
+    } catch (error) {
+      console.error('Error loading elections:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadElections = async () => {
 
