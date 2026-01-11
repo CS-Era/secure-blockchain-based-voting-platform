@@ -12,7 +12,6 @@ const pool = new Pool({
     port: process.env.DB_PORT || 5432,
 });
 
-// Interfaccia per conferma
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -30,56 +29,39 @@ async function resetDatabase() {
     const client = await pool.connect();
 
     try {
-        console.log('⚠️  ATTENZIONE: Questo script cancellerà TUTTI i dati esistenti!\n');
-
-        const confirm = await askConfirmation('Sei sicuro di voler continuare? (s/n): ');
-
-        if (!confirm) {
-            console.log('❌ Operazione annullata.');
-            rl.close();
-            process.exit(0);
-        }
-
-        console.log('\n🔄 Connessione al database...');
 
         await client.query('BEGIN');
 
-        // DROP tabella esistente
-        console.log('🗑️  Eliminazione tabella users esistente...');
+        // ============================
+        // DROP
+        // ============================
+        console.log('🗑️  Eliminazione tabelle esistenti...');
+        await client.query('DROP TABLE IF EXISTS votes CASCADE');
+        await client.query('DROP TABLE IF EXISTS elections CASCADE');
         await client.query('DROP TABLE IF EXISTS users CASCADE');
 
-        // DROP funzioni e trigger esistenti
-        console.log('🗑️  Eliminazione funzioni e trigger...');
         await client.query('DROP TRIGGER IF EXISTS update_users_updated_at ON users');
         await client.query('DROP FUNCTION IF EXISTS update_updated_at_column()');
 
-        // Crea la nuova tabella users
-        console.log('📝 Creazione nuova tabella users...');
+        // ============================
+        // USERS
+        // ============================
+        console.log('📝 Creazione tabella users...');
         await client.query(`
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 full_name VARCHAR(255) NOT NULL,
                 matricola VARCHAR(50) UNIQUE NOT NULL,
                 password_hash VARCHAR(255) NOT NULL,
-                role VARCHAR(20) NOT NULL DEFAULT 'student' CHECK (role IN ('student', 'admin', 'super_admin')),
+                role VARCHAR(20) NOT NULL DEFAULT 'student'
+                    CHECK (role IN ('student', 'admin', 'super_admin')),
+                state BOOLEAN NOT NULL DEFAULT true,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                state BOOLEAN NOT NULL DEFAULT true
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
-        // Crea gli indici
-        console.log('📇 Creazione indici...');
-        await client.query(`
-            CREATE INDEX idx_users_matricola ON users(matricola)
-        `);
-
-        await client.query(`
-            CREATE INDEX idx_users_role ON users(role)
-        `);
-
-        // Crea la funzione per updated_at
-        console.log('⚙️  Creazione funzione trigger per updated_at...');
+        // Trigger updated_at
         await client.query(`
             CREATE OR REPLACE FUNCTION update_updated_at_column()
             RETURNS TRIGGER AS $$
@@ -90,80 +72,75 @@ async function resetDatabase() {
             $$ language 'plpgsql'
         `);
 
-        // Crea il trigger
         await client.query(`
-            CREATE TRIGGER update_users_updated_at 
-                BEFORE UPDATE ON users 
-                FOR EACH ROW 
-                EXECUTE FUNCTION update_updated_at_column()
+            CREATE TRIGGER update_users_updated_at
+            BEFORE UPDATE ON users
+            FOR EACH ROW
+            EXECUTE FUNCTION update_updated_at_column()
         `);
 
-        // Inserisci utenti di default
+        // ============================
+        // ELECTIONS
+        // ============================
+        console.log('🗳️  Creazione tabella elections...');
+        await client.query(`
+            CREATE TABLE elections (
+                id VARCHAR(255) PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                candidates JSONB NOT NULL,
+                blockchain_hash VARCHAR(255) NOT NULL,
+                start_date TIMESTAMP NOT NULL,
+                end_date TIMESTAMP NOT NULL,
+                is_active BOOLEAN DEFAULT true,
+                created_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                merkle_root TEXT,
+                results_hash TEXT
+            )
+        `);
+
+        // ============================
+        // votes
+        // ============================
+        console.log('🔗 Creazione tabella votes...');
+        await client.query(`
+            CREATE TABLE votes (
+               user_id INTEGER NOT NULL REFERENCES users(id),
+               election_id VARCHAR(255) NOT NULL REFERENCES elections(id) ON DELETE CASCADE,
+               candidate_id INTEGER NOT NULL REFERENCES users(id),
+               vote_hash TEXT NOT NULL,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (user_id, election_id)
+            )
+        `);
+
+
+        // ============================
+        // UTENTI DI DEFAULT
+        // ============================
         console.log('👥 Creazione utenti di default...');
 
-        // Super Admin
         const superAdminPassword = await bcrypt.hash('superadmin123', 10);
-        await client.query(`
-            INSERT INTO users (full_name, matricola, password_hash, role) 
-            VALUES ($1, $2, $3, $4)
-        `, ['UniSa Admin', 'superadmin', superAdminPassword, 'super_admin']);
-
-        // Admin
         const adminPassword = await bcrypt.hash('admin123', 10);
-        await client.query(`
-            INSERT INTO users (full_name, matricola, password_hash, role) 
-            VALUES ($1, $2, $3, $4)
-        `, ['Segreteria Studenti', 'admin', adminPassword, 'admin']);
-
-        // Student di test
         const studentPassword = await bcrypt.hash('student123', 10);
+
         await client.query(`
-            INSERT INTO users (full_name, matricola, password_hash, role) 
-            VALUES ($1, $2, $3, $4)
-        `, ['Mario Rossi', 'N86001234', studentPassword, 'student']);
+            INSERT INTO users (full_name, matricola, password_hash, role)
+            VALUES
+            ('UniSa Admin', 'superadmin', $1, 'super_admin'),
+            ('Segreteria Studenti', 'admin', $2, 'admin'),
+            ('Mario Rossi', 'N86001234', $3, 'student')
+        `, [superAdminPassword, adminPassword, studentPassword]);
 
         await client.query('COMMIT');
 
-        console.log('\n✅ Database ripulito e ricreato con successo!\n');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📊 STRUTTURA TABELLA:');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('   - id (SERIAL PRIMARY KEY)');
-        console.log('   - full_name (VARCHAR 255)');
-        console.log('   - matricola (VARCHAR 50 UNIQUE)');
-        console.log('   - password_hash (VARCHAR 255)');
-        console.log('   - role (student | admin | super_admin)');
-        console.log('   - created_at (TIMESTAMP)');
-        console.log('   - updated_at (TIMESTAMP)');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        console.log('👥 UTENTI CREATI:');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('\n🔴 SUPER ADMIN:');
-        console.log('   Nome:      Super Amministratore');
-        console.log('   Matricola: superadmin');
-        console.log('   Password:  superadmin123');
-        console.log('   Ruolo:     super_admin');
-
-        console.log('\n🟡 ADMIN:');
-        console.log('   Nome:      Amministratore');
-        console.log('   Matricola: admin');
-        console.log('   Password:  admin123');
-        console.log('   Ruolo:     admin');
-
-        console.log('\n🟢 STUDENT (Test):');
-        console.log('   Nome:      Mario Rossi');
-        console.log('   Matricola: N86001234');
-        console.log('   Password:  student123');
-        console.log('   Ruolo:     student');
-
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('⚠️  IMPORTANTE: Cambia queste password in produzione!');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.log('\n✅ Database inizializzato correttamente!');
+        console.log('📌 Tabelle create: users, elections, votes');
 
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('\n❌ Errore durante il reset del database:', error);
+        console.error('❌ Errore:', error);
         process.exit(1);
     } finally {
         client.release();
@@ -172,11 +149,4 @@ async function resetDatabase() {
     }
 }
 
-// Esegui lo script
-resetDatabase().then(() => {
-    console.log('🎉 Reset completato con successo!\n');
-    process.exit(0);
-}).catch(error => {
-    console.error('\n💥 Errore fatale:', error);
-    process.exit(1);
-});
+resetDatabase();

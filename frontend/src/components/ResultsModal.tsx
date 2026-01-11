@@ -1,131 +1,60 @@
 import { useState, useEffect } from 'react';
-import { X, User, TrendingUp } from 'lucide-react';
-import {Candidate, Election} from "../api.ts";
-
-interface VoteCount {
-  candidate_id: string;
-  count: number;
-}
-
-interface CandidateResult extends Candidate {
-  voteCount: number;
-  percentage: number;
-}
+import { X, TrendingUp } from 'lucide-react';
+import {CandidateResult, Election, getElectionResults} from '../contexts/api';
 
 interface ResultsModalProps {
-  electionId: string;
+  election: Election;
   onClose: () => void;
 }
 
-export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
-  const [election, setElection] = useState<Election | null>(null);
+export const ResultsModal = ({election, onClose }: ResultsModalProps) => {
   const [results, setResults] = useState<CandidateResult[]>([]);
   const [totalVotes, setTotalVotes] = useState(0);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     loadResults();
-  }, [electionId]);
-
-  useEffect(() => {
-    loadFakeResults();
-  }, [electionId]);
-
-  const loadFakeResults = async () => {
-    try {
-      // Simuliamo l'elezione corrente
-      const fakeElection = {
-        id: electionId,
-        title: 'Elezione del Presidente',
-        description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
-        start_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 giorni fa
-        end_date: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),   // 1 giorno fa
-        isOpen: false
-      };
-
-      // Simuliamo i candidati
-      const fakeCandidates = [
-        { id: 'cand-1', name: 'Mario Rossi', description: 'Studente di ingegneria' },
-        { id: 'cand-2', name: 'Luigi Bianchi', description: 'Studente di economia' },
-        { id: 'cand-3', name: 'Anna Verdi', description: 'Studente di matematica' },
-      ];
-
-      // Simuliamo i voti
-      const fakeVotes = [
-        { candidate_id: 'cand-1' },
-        { candidate_id: 'cand-2' },
-        { candidate_id: 'cand-1' },
-        { candidate_id: 'cand-3' },
-        { candidate_id: 'cand-1' },
-      ];
-
-      setElection(fakeElection);
-
-      // Conta i voti per candidato
-      const voteCounts = new Map<string, number>();
-      fakeVotes.forEach(vote => {
-        voteCounts.set(vote.candidate_id, (voteCounts.get(vote.candidate_id) || 0) + 1);
-      });
-
-      const total = fakeVotes.length;
-      setTotalVotes(total);
-
-      // Costruisci i risultati dei candidati
-      const candidateResults: CandidateResult[] = fakeCandidates.map(candidate => {
-        const voteCount = voteCounts.get(candidate.id) || 0;
-        const percentage = total > 0 ? (voteCount / total) * 100 : 0;
-        return {
-          ...candidate,
-          voteCount,
-          percentage
-        };
-      }).sort((a, b) => b.voteCount - a.voteCount);
-
-      setResults(candidateResults);
-
-    } catch (error) {
-      console.error('Error loading results:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  }, [election.id]);
 
   const loadResults = async () => {
     try {
-      const [electionRes, candidatesRes, votesRes] = await Promise.all([
-        supabase.from('elections').select('*').eq('id', electionId).single(),
-        supabase.from('candidates').select('*').eq('election_id', electionId),
-        supabase.from('votes').select('candidate_id').eq('election_id', electionId)
-      ]);
+      setLoading(true);
+      setError('');
 
-      if (electionRes.error) throw electionRes.error;
-      if (candidatesRes.error) throw candidatesRes.error;
-      if (votesRes.error) throw votesRes.error;
+      console.log(election);
+      const data = await getElectionResults(election.id);
 
-      setElection(electionRes.data);
+      console.log("DATI DAL API: " , data);
+      if (!data || !data.results) {
+        setResults([]);
+        setTotalVotes(0);
+        setTitle('Elezione');
+        setDescription('');
+        return;
+      }
 
-      const voteCounts = new Map<string, number>();
-      votesRes.data.forEach(vote => {
-        voteCounts.set(vote.candidate_id, (voteCounts.get(vote.candidate_id) || 0) + 1);
-      });
+      setTitle(election.title);
+      setDescription(election.description);
 
-      const total = votesRes.data.length;
+      const total = data.results.reduce((acc, r) => acc + Number(r.votes), 0);
       setTotalVotes(total);
 
-      const candidateResults: CandidateResult[] = (candidatesRes.data || []).map(candidate => {
-        const voteCount = voteCounts.get(candidate.id) || 0;
-        const percentage = total > 0 ? (voteCount / total) * 100 : 0;
-        return {
-          ...candidate,
-          voteCount,
-          percentage
-        };
-      }).sort((a, b) => b.voteCount - a.voteCount);
+      const ElectionResults: CandidateResult[] = data.results.map(r => ({
+        candidate_id: r.candidate_id,
+        candidate_name: r.candidate_name,
+        candidate_description: r.candidate_description || '',
+        votes: Number(r.votes),
+        percentage: total > 0 ? (Number(r.votes) / total) * 100 : 0
+      })).sort((a, b) => b.votes - a.votes);
 
-      setResults(candidateResults);
-    } catch (error) {
-      console.error('Error loading results:', error);
+      setResults(ElectionResults);
+
+    } catch (err) {
+      console.error('Errore caricamento risultati:', err);
+      setError(err instanceof Error ? err.message : 'Errore nel caricamento dei risultati');
     } finally {
       setLoading(false);
     }
@@ -133,14 +62,14 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
 
   if (loading) {
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-        <div className="bg-white rounded-2xl p-8 max-w-3xl w-full">
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-            <p className="text-gray-600">Caricamento risultati...</p>
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl p-8 max-w-3xl w-full">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <p className="text-gray-600">Caricamento risultati...</p>
+            </div>
           </div>
         </div>
-      </div>
     );
   }
 
@@ -150,11 +79,14 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
       <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
         <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
 
-          {/* HEADER FISSO */}
+          {error && <div className="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-6 text-sm">{error}</div>}
+
+          {/* HEADER */}
           <div className="flex flex-col p-6 border-b border-gray-200 flex-none space-y-4">
             <div className="flex items-start justify-between">
               <div>
-                <h2 className="text-2xl font-bold text-gray-900 mb-2">{election?.title}</h2>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">{title}</h2>
+                <h1 className="text-2xl text-gray-900 mb-2">{description}</h1>
                 <p className="text-gray-600">
                   Risultati finali - {totalVotes} {totalVotes === 1 ? 'voto' : 'voti'} totali
                 </p>
@@ -174,9 +106,9 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
                     <TrendingUp className="w-6 h-6" />
                     <h3 className="text-xl font-bold">Vincitore</h3>
                   </div>
-                  <p className="text-2xl font-bold mb-1">{winner.name}</p>
+                  <p className="text-2xl font-bold mb-1">{winner.candidate_name}</p>
                   <p className="text-blue-100">
-                    {winner.voteCount} {winner.voteCount === 1 ? 'voto' : 'voti'} ({winner.percentage.toFixed(1)}%)
+                    {winner.votes} {winner.votes === 1 ? 'voto' : 'voti'} ({winner.percentage.toFixed(1)}%)
                   </p>
                 </div>
             )}
@@ -192,14 +124,14 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
                 <div className="space-y-4">
                   <h3 className="text-lg font-bold text-gray-900 mb-4">Tutti i Candidati</h3>
                   {results.map((candidate, index) => (
-                      <div key={candidate.id} className="bg-gray-50 rounded-xl p-6">
+                      <div key={candidate.candidate_id} className="bg-gray-50 rounded-xl p-6">
                         <div className="flex items-start gap-4 mb-4">
                           <div className="w-12 h-12 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
                             {index + 1}
                           </div>
                           <div className="flex-1">
-                            <h4 className="text-lg font-bold text-gray-900 mb-1">{candidate.name}</h4>
-                            <p className="text-gray-600 text-sm mb-3">{candidate.description}</p>
+                            <h4 className="text-lg font-bold text-gray-900 mb-1">{candidate.candidate_name}</h4>
+                            <p className="text-gray-600 text-sm mb-3">{candidate.candidate_description}</p>
                             <div className="flex items-center gap-4">
                               <div className="flex-1 bg-gray-200 rounded-full h-3 overflow-hidden">
                                 <div
@@ -209,7 +141,7 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
                               </div>
                               <div className="text-right min-w-[120px]">
                                 <p className="text-lg font-bold text-gray-900">
-                                  {candidate.voteCount} {candidate.voteCount === 1 ? 'voto' : 'voti'}
+                                  {candidate.votes} {candidate.votes === 1 ? 'voto' : 'voti'}
                                 </p>
                                 <p className="text-sm text-gray-600">{candidate.percentage.toFixed(1)}%</p>
                               </div>
@@ -222,7 +154,7 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
             )}
           </div>
 
-          {/* FOOTER FISSO */}
+          {/* FOOTER */}
           <div className="p-6 border-t border-gray-200 flex-none">
             <button
                 onClick={onClose}
@@ -231,9 +163,8 @@ export const ResultsModal = ({ electionId, onClose }: ResultsModalProps) => {
               Chiudi
             </button>
           </div>
+
         </div>
       </div>
   );
-
-
 };

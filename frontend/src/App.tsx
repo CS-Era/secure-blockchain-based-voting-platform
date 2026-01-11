@@ -7,16 +7,16 @@ import { ElectionsList } from './components/ElectionsList';
 import { VotingModal } from './components/VotingModal';
 import { ResultsModal } from './components/ResultsModal';
 import { LogOut, Vote, Settings } from 'lucide-react';
+import {Election} from "./contexts/api.ts";
 
 function AppContent() {
   const { user, loading, signOut } = useAuth();
 
-  // id per i modal
-  const [votingElectionId, setVotingElectionId] = useState<string | null>(null);
-  const [resultsElectionId, setResultsElectionId] = useState<string | null>(null);
+  const [votingElection, setVotingElection] = useState<Election | null>(null);
+  const [resultsElection, setResultsElection] = useState<Election | null>(null);
 
   // forzare refresh dei figli quando necessario
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshKey] = useState(0);
 
   // ruoli locali calcolati
   const [isAdmin, setIsAdmin] = useState(false);
@@ -94,15 +94,15 @@ function AppContent() {
           {isSuperAdmin ? (
               // SuperAdminDashboard: spazio per funzioni globali (es. gestione amministratori, auditing)
               <SuperAdminDashboard
-                  onVote={(electionId) => setVotingElectionId(electionId)}
-                  onViewResults={(electionId) => setResultsElectionId(electionId)}
+                  onVote={(election) => setVotingElection(election)}
+                  onViewResults={(election) => setResultsElection(election)}
                   refreshKey={refreshKey}
               />
           ) : isAdmin ? (
               // AdminDashboard per normali permessi da admin
               <AdminDashboard
-                  onVote={(electionId) => setVotingElectionId(electionId)}
-                  onViewResults={(electionId) => setResultsElectionId(electionId)}
+                  onVote={(election) => setVotingElection(election)}
+                  onViewResults={(election) => setResultsElection(election)}
                   refreshKey={refreshKey}
               />
           ) : (
@@ -115,28 +115,28 @@ function AppContent() {
 
                 <ElectionsList
                     key={refreshKey}
-                    onVote={(electionId) => setVotingElectionId(electionId)}
-                    onViewResults={(electionId) => setResultsElectionId(electionId)}
+                    onVote={(election) => setVotingElection(election)}
+                    onViewResults={(election) => setResultsElection(election)}
+                    isAdmin={false}
                 />
               </>
           )}
         </main>
 
-        {votingElectionId && (
+        {votingElection && (
             <VotingModal
-                electionId={votingElectionId}
-                onClose={() => setVotingElectionId(null)}
+                election={votingElection}
+                onClose={() => setVotingElection(null)}
                 onVoteSuccess={() => {
-                  setVotingElectionId(null);
-                  setRefreshKey(prev => prev + 1);
+                  setVotingElection(null);
                 }}
             />
         )}
 
-        {resultsElectionId && (
+        {resultsElection && (
             <ResultsModal
-                electionId={resultsElectionId}
-                onClose={() => setResultsElectionId(null)}
+                election={resultsElection}
+                onClose={() => setResultsElection(null)}
             />
         )}
       </div>

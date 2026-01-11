@@ -3,11 +3,12 @@ import { Plus, UserPlus, X } from 'lucide-react';
 import { CreateElectionForm } from './CreateElectionForm';
 import { ElectionsList } from './ElectionsList';
 import { useAuth } from '../contexts/AuthContext';
-import { RegisterForm } from './RegisterForm'; // path adattare se necessario
+import { RegisterForm } from './RegisterForm';
+import {Election} from "../contexts/api.ts"; // path adattare se necessario
 
 interface AdminDashboardProps {
-    onVote: (electionId: string) => void;
-    onViewResults: (electionId: string) => void;
+    onVote: (election: Election) => void;
+    onViewResults: (election: Election) => void;
     refreshKey: number;
 }
 
@@ -58,6 +59,7 @@ export const SuperAdminDashboard = ({ onVote, onViewResults, refreshKey }: Admin
                 key={refresh}
                 onVote={onVote}
                 onViewResults={onViewResults}
+                isAdmin={true}
             />
 
             {showCreateElectionForm && (

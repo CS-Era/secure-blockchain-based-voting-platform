@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { Plus } from 'lucide-react';
 import { CreateElectionForm } from './CreateElectionForm';
 import { ElectionsList } from './ElectionsList';
+import {Election} from "../contexts/api.ts";
 
 interface AdminDashboardProps {
-  onVote: (electionId: string) => void;
-  onViewResults: (electionId: string) => void;
+  onVote: (election: Election) => void;
+  onViewResults: (election: Election) => void;
   refreshKey: number;
 }
 
@@ -37,6 +38,7 @@ export const AdminDashboard = ({ onVote, onViewResults, refreshKey }: AdminDashb
             key={refresh}
             onVote={onVote}
             onViewResults={onViewResults}
+            isAdmin={true}
         />
 
         {showCreateForm && (

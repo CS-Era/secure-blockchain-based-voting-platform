@@ -1,76 +1,28 @@
 import { useState, useEffect } from 'react';
 import { X, User } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { Candidate, Election } from "../api.ts";
+import {Election, vote} from "../contexts/api.ts";
 
 interface VotingModalProps {
-  electionId: string;
+  election: Election;
   onClose: () => void;
   onVoteSuccess: () => void;
 }
 
-export const VotingModal = ({ electionId, onClose, onVoteSuccess }: VotingModalProps) => {
-  const [election, setElection] = useState<Election | null>(null);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+export const VotingModal = ({
+                              election,
+                              onClose,
+                              onVoteSuccess
+                            }: VotingModalProps) => {
+  const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const { user, token } = useAuth();
+  const { user } = useAuth();
 
   useEffect(() => {
-    loadFakeElectionData();
-  }, [electionId]);
-
-  const loadFakeElectionData = async () => {
-    try {
-      // Dati fittizi per l'elezione
-      const fakeElection = {
-        id: electionId,
-        title: 'Elezione del Presidente',
-        description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
-        start_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 giorni fa
-        end_date: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),   // tra 2 giorni
-      };
-
-      // Dati fittizi per i candidati
-      const fakeCandidates = [
-        { id: 'cand-1', name: 'Mario Rossi', description: 'Studente di ingegneria' },
-        { id: 'cand-2', name: 'Luigi Bianchi', description: 'Studente di economia' },
-        { id: 'cand-3', name: 'Anna Verdi', description: 'Studente di matematica' },
-      ];
-
-      // Simula un piccolo delay come se fosse fetch
-      await new Promise(res => setTimeout(res, 500));
-
-      setElection(fakeElection);
-      setCandidates(fakeCandidates);
-
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'Errore nel caricamento dei dati');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadElectionData = async () => {
-    try {
-      const res = await fetch(`/api/election/${electionId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error('Errore nel caricamento dell\'elezione');
-      const data = await res.json();
-
-      setElection(data);
-      setCandidates(data.candidates || []);
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'Errore nel caricamento dei dati');
-    } finally {
-      setLoading(false);
-    }
-  };
+    console.log("🗳️ [VotingModal] Election ricevuta:", election);
+    console.log("👥 [VotingModal] Candidates:", election.candidates);
+  }, [election]);
 
   const handleSubmit = async () => {
     if (!selectedCandidate || !user) return;
@@ -79,43 +31,20 @@ export const VotingModal = ({ electionId, onClose, onVoteSuccess }: VotingModalP
     setError('');
 
     try {
-      const res = await fetch('/api/vote', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          electionID: electionId,
-          proposal: selectedCandidate
-        })
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Errore durante il salvataggio del voto');
+      await vote(election.id, selectedCandidate);
 
       onVoteSuccess();
       onClose();
     } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'Errore durante il salvataggio del voto. Potresti aver già votato.');
+      setError(
+          err instanceof Error
+              ? err.message
+              : 'Errore durante il salvataggio del voto. Potresti aver già votato.'
+      );
     } finally {
       setSubmitting(false);
     }
   };
-
-  if (loading) {
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-8 max-w-2xl w-full">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Caricamento...</p>
-            </div>
-          </div>
-        </div>
-    );
-  }
 
   return (
       <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
@@ -133,7 +62,7 @@ export const VotingModal = ({ electionId, onClose, onVoteSuccess }: VotingModalP
           {error && <div className="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-6 text-sm">{error}</div>}
 
           <div className="space-y-4 mb-8">
-            {candidates.map(candidate => (
+            {election.candidates.map(candidate => (
                 <button
                     key={candidate.id}
                     onClick={() => setSelectedCandidate(candidate.id)}

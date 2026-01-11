@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
+import {createUserSuperAdmin} from "../contexts/api.ts";
 
 interface RegisterFormProps {
   asAdmin?: boolean; // se true usa l'endpoint protetto per creare studenti senza fare login
@@ -8,7 +9,7 @@ interface RegisterFormProps {
 
 type Role = 'student' | 'admin' | 'super_admin';
 
-export const RegisterForm = ({ token = null, onSuccess }: RegisterFormProps) => {
+export const RegisterForm = ({onSuccess }: RegisterFormProps) => {
   const [matricola, setMatricola] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
@@ -16,8 +17,6 @@ export const RegisterForm = ({ token = null, onSuccess }: RegisterFormProps) => 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
-
-  const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
   const roleLabel = (r: Role) => {
     switch (r) {
@@ -30,37 +29,25 @@ export const RegisterForm = ({ token = null, onSuccess }: RegisterFormProps) => 
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-    setSuccess('');
+    setError("");
+    setSuccess("");
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/superadmin/create-user`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ matricola, password, fullName, role }),
-      });
+      // ✅ Usa la funzione dell'API centralizzata
+      await createUserSuperAdmin({ matricola, password, fullName, role });
 
-      const data = await res.json().catch(() => ({}));
+      // Se non ci sono errori → successo
+      setSuccess("Registrazione completata con successo");
+      setError("");
 
-      if (res.status === 201) {
-        setSuccess('Registrazione completata con successo');
-        setError('');
-        setTimeout(() => {
-          if (onSuccess) onSuccess();
-        }, 700);
-      } else {
-        const errMsg = data?.error || `Errore (${res.status}) durante la registrazione`;
-        setError(errMsg);
-        setSuccess('');
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Si è verificato un errore';
-      setError(msg);
-      setSuccess('');
+      setTimeout(() => {
+        if (onSuccess) onSuccess();
+      }, 700);
+
+    } catch (err: any) {
+      setError(err);
+      setSuccess("");
     } finally {
       setLoading(false);
     }

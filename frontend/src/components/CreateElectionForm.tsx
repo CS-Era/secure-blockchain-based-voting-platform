@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
-import { X, Trash2, Users } from 'lucide-react';
-import { User } from "../api.ts";
+import React, { useState, useEffect } from 'react';
+import { X, Users } from 'lucide-react';
+import {Candidate, createElection, getStudents, Student} from "../contexts/api.ts";
 
 interface CreateElectionFormProps {
   onClose: () => void;
@@ -8,21 +8,15 @@ interface CreateElectionFormProps {
   token?: string | null;
 }
 
-interface Candidate {
-  id: string;
-  name: string;
-  description: string;
-}
-
-export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElectionFormProps) => {
+export const CreateElectionForm = ({ onClose, onSuccess }: CreateElectionFormProps) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [startDate, setStartDate] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endDate, setEndDate] = useState('');
   const [endTime, setEndTime] = useState('');
-  const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
-  const [allStudents, setAllStudents] = useState<User[]>([]);
+  const [selectedStudents, setSelectedStudents] = useState<Set<number>>(new Set());
+  const [allStudents, setAllStudents] = useState<Student[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -47,14 +41,18 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
   }, [selectedStudents, allStudents]);
 
   const loadStudents = async () => {
+    setLoading(true);
+    setError("");
+
     try {
-      const res = await fetch('http://localhost:3000/api/students');
-      if (!res.ok) throw new Error('Errore nel caricamento degli studenti');
-      const data = await res.json();
+      // ✅ Chiama la funzione centralizzata dell'API
+      const data = await getStudents(); // ritorna { students: User[] }
+
+      // Aggiorna lo stato con gli studenti
       setAllStudents(data.students || []);
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'Errore nel caricamento degli studenti');
+
+    } catch (err: any) {
+      setError(err);
     } finally {
       setLoading(false);
     }
@@ -62,9 +60,8 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
 
   const toggleStudent = (studentId: number) => {
     const newSelected = new Set(selectedStudents);
-    const strId = String(studentId);
-    if (newSelected.has(strId)) newSelected.delete(strId);
-    else newSelected.add(strId);
+    if (newSelected.has(studentId)) newSelected.delete(studentId);
+    else newSelected.add(studentId);
     setSelectedStudents(newSelected);
   };
 
@@ -76,20 +73,20 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
+    setError("");
 
     if (!title.trim() || !description.trim()) {
-      setError('Titolo e descrizione sono obbligatori');
+      setError("Titolo e descrizione sono obbligatori");
       return;
     }
 
-    if (!startDate || !startTime || !endDate || !endTime) {
-      setError('Data e ora di inizio e fine obbligatorie');
+    if (!startDate || !endDate) {
+      setError("Data e ora di inizio e fine obbligatorie");
       return;
     }
 
     if (selectedStudents.size === 0) {
-      setError('Seleziona almeno uno studente eleggibile');
+      setError("Seleziona almeno uno studente eleggibile");
       return;
     }
 
@@ -100,39 +97,29 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
       const endDateTime = new Date(`${endDate}T${endTime}`).toISOString();
 
       if (new Date(startDateTime) >= new Date(endDateTime)) {
-        setError('La data di fine deve essere successiva alla data di inizio');
+        setError("La data di fine deve essere successiva alla data di inizio");
         return;
       }
 
-      const res = await fetch('http://localhost:3000/api/create-election', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          id: `election-${Date.now()}`,
-          title: title.trim(),
-          description: description.trim(),
-          proposals: candidates.map(c => ({ name: c.name.trim(), description: c.description.trim() })),
-          start_date: startDateTime,
-          end_date: endDateTime,
-          eligible_students: Array.from(selectedStudents)
-        })
+      // ✅ Chiama la funzione centralizzata dell'API
+      await createElection({
+        title: title.trim(),
+        description: description.trim(),
+        start_date: startDateTime,
+        end_date: endDateTime,
+        candidates: candidates.map(c => ({ name: c.name.trim(), id: c.id, description: c.description }))
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Errore nella creazione dell\'elezione');
 
       onSuccess();
       onClose();
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : 'Errore nella creazione dell\'elezione');
+
+    } catch (err: any) {
+      setError(err);
     } finally {
       setSubmitting(false);
     }
   };
+
 
   if (loading) {
     return (
@@ -219,7 +206,7 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
                       className="w-full flex items-center justify-between px-4 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition font-medium text-gray-700">
                 <div className="flex items-center gap-2">
                   <Users className="w-5 h-5"/>
-                  <span>Studenti Eleggibili ({selectedStudents.size})</span>
+                  <span>Studenti Eleggibili</span>
                 </div>
                 <span className="text-gray-500">{showStudents ? '▼' : '▶'}</span>
               </button>
@@ -234,7 +221,7 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
                               <label key={student.id}
                                      className="flex items-center gap-3 p-2 hover:bg-gray-100 rounded-lg cursor-pointer">
                                 <input type="checkbox"
-                                       checked={selectedStudents.has(String(student.id))}
+                                       checked={selectedStudents.has(student.id)}
                                        onChange={() => toggleStudent(student.id)}
                                        className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 cursor-pointer"/>
                                 <div className="flex-1">
@@ -272,19 +259,20 @@ export const CreateElectionForm = ({ onClose, onSuccess, token }: CreateElection
                 ))}
               </div>
             </div>
+            {/* FOOTER BOTTONI */}
+            <div className="flex gap-3 p-6 border-t border-gray-200 flex-none">
+              <button type="button" onClick={onClose}
+                      className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-3 rounded-lg transition">
+                Annulla
+              </button>
+              <button type="submit" disabled={submitting}
+                      className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed">
+                {submitting ? 'Creazione...' : 'Crea Elezione'}
+              </button>
+            </div>
           </form>
 
-          {/* FOOTER BOTTONI */}
-          <div className="flex gap-3 p-6 border-t border-gray-200 flex-none">
-            <button type="button" onClick={onClose}
-                    className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-3 rounded-lg transition">
-              Annulla
-            </button>
-            <button type="submit" disabled={submitting}
-                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed">
-              {submitting ? 'Creazione...' : 'Crea Elezione'}
-            </button>
-          </div>
+
         </div>
       </div>
   );

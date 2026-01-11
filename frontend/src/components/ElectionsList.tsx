@@ -1,162 +1,82 @@
 import { useState, useEffect } from 'react';
 import { ElectionCard } from './ElectionCard';
 import { useAuth } from '../contexts/AuthContext';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-
-interface Election {
-  id: string;
-  title: string;
-  description?: string;
-  proposals: string[];
-  isOpen: boolean;
-  status: 'open' | 'closed' | 'upcoming';
-  start_date?: string;
-  end_date?: string;
-}
+import {Election, getElections} from "../contexts/api.ts";
 
 interface ElectionsListProps {
-  onVote: (electionId: string) => void;
-  onViewResults: (electionId: string) => void;
+  onVote: (election: Election) => void;
+  onViewResults: (election: Election) => void;
+  isAdmin: boolean;
 }
 
-export const ElectionsList = ({ onVote, onViewResults }: ElectionsListProps) => {
+export const ElectionsList = ({ onVote, onViewResults, isAdmin }: ElectionsListProps) => {
   const [elections, setElections] = useState<Election[]>([]);
-  const [votedElectionIds, setVotedElectionIds] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<'all' | 'open' | 'voted' | 'closed'>('all');
+  const [filter, setFilter] = useState<'all' | 'open' | 'voted' | 'closed' | 'upcoming'>('all');
   const [loading, setLoading] = useState(true);
   const { token } = useAuth();
 
   useEffect(() => {
-    loadFakeElections();
+    loadElections();
   }, [token]);
 
-
-  const loadFakeElections = async () => {
-    try {
-      // Dati fittizi
-      const fakeData: Election[] = [
-        {
-          id: 'election-1',
-          title: 'Elezione del Presidente',
-          description: 'Elezione per scegliere il nuovo presidente del consiglio studentesco',
-          proposals: [
-            { name: 'Mario Rossi', description: 'Studente di ingegneria' },
-            { name: 'Luigi Bianchi', description: 'Studente di economia' },
-          ],
-          isOpen: true,
-          status: 'open',
-          start_date: new Date().toISOString(),
-          end_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 giorni dopo
-        },
-        {
-          id: 'election-2',
-          title: 'Elezione Rappresentante Classe',
-          description: 'Elezione per il rappresentante della classe 4B',
-          proposals: [
-            { name: 'Anna Verdi', description: 'Studente di matematica' },
-            { name: 'Paolo Neri', description: 'Studente di fisica' },
-          ],
-          isOpen: false,
-          status: 'closed',
-          start_date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 giorni fa
-          end_date: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString(), // 4 giorni fa
-        },
-      ];
-
-      // Trasforma i dati se serve (come facevi prima)
-      const transformedElections: Election[] = fakeData.map(e => ({
-        ...e,
-        proposals: e.proposals || [],
-      }));
-
-      setElections(transformedElections);
-
-      // Se avevi bisogno di caricare lo stato dei voti, puoi simulare anche quello
-      // await loadVotesStatus(transformedElections);
-
-    } catch (error) {
-      console.error('Error loading elections:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const loadElections = async () => {
-
     try {
-      const response = await fetch(`${API_BASE_URL}/api/elections`, {
-      });
+      setLoading(true);
 
-      if (!response.ok) {
-        throw new Error('Errore nel caricamento delle elezioni');
-      }
+      const { elections } = await getElections();
 
-      const data = await response.json();
-
-      // Trasforma i dati dalla blockchain al formato del componente
-      const transformedElections: Election[] = data.map((e: Election) => ({
-        id: e.id,
-        title: e.title,
-        description: e.description,
-        proposals: e.proposals || [],
-        isOpen: e.isOpen,
-        status: e.isOpen ? 'open' : 'closed',
-        start_date: new Date().toISOString(),
-        end_date: new Date().toISOString(),
-      }));
+      const transformedElections: Election[] =
+          elections.map(mapElectionFromApi);
 
       setElections(transformedElections);
 
-      // Carica lo stato dei voti per ogni elezione
-      await loadVotesStatus(transformedElections);
     } catch (error) {
-      console.error('Error loading elections:', error);
+      console.error("Error loading elections:", error);
     } finally {
       setLoading(false);
     }
   };
 
-  const loadVotesStatus = async (electionsData: Election[]) => {
-    if (!token) return;
+  const mapElectionFromApi = (e: any): Election => {
+    const status = getElectionStatus(e.start_date, e.end_date, e.is_active);
 
-    try {
-      const votedIds = new Set<string>();
+    return {
+      id: e.id,
+      title: e.title,
+      description: e.description,
+      candidates: e.candidates ?? [],
+      is_active: e.is_active,
+      status,
+      start_date: e.start_date,
+      end_date: e.end_date,
+      hasVoted: e.hasVoted
+    };
+  };
 
-      for (const election of electionsData) {
-        try {
-          const response = await fetch(`${API_BASE_URL}/api/has-voted/${election.id}`, {
-            headers: {
-              'Authorization': `Bearer ${token}`,
-            },
-          });
+  const getElectionStatus = (
+      startDate: string,
+      endDate: string,
+      is_active: boolean
+  ): "open" | "closed" | "upcoming" => {
+    const now = new Date();
+    const start = new Date(startDate);
+    const end = new Date(endDate);
 
-          if (response.ok) {
-            const data = await response.json();
-            if (data.hasVoted) {
-              votedIds.add(election.id);
-            }
-          }
-        } catch (error) {
-          console.error(`Error checking vote status for ${election.id}:`, error);
-        }
-      }
+    if (now > end || !is_active) return "closed";
+    if (now < start) return "upcoming";
 
-      setVotedElectionIds(votedIds);
-    } catch (error) {
-      console.error('Error loading votes status:', error);
-    }
+    return "open";
   };
 
   const getFilteredElections = () => {
     return elections.filter(election => {
-      const isOpen = election.status === 'open';
-      const isClosed = election.status === 'closed';
-      const hasVoted = votedElectionIds.has(election.id);
+      const { status, hasVoted } = election;
 
-      if (filter === 'open') return isOpen;
-      if (filter === 'voted') return hasVoted;
-      if (filter === 'closed') return isClosed;
+      if (filter === "open") return status === "open";
+      if (filter === "upcoming") return status === "upcoming";
+      if (filter === "closed") return status === "closed";
+      if (filter === "voted") return hasVoted === true;
+
       return true;
     });
   };
@@ -217,6 +137,16 @@ export const ElectionsList = ({ onVote, onViewResults }: ElectionsListProps) => 
           >
             Chiuse
           </button>
+          <button
+              onClick={() => setFilter('upcoming')}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                  filter === 'upcoming'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+          >
+            In Arrivo
+          </button>
         </div>
 
         {filteredElections.length === 0 ? (
@@ -225,16 +155,20 @@ export const ElectionsList = ({ onVote, onViewResults }: ElectionsListProps) => 
             </div>
         ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {filteredElections.map(election => (
-                  <ElectionCard
-                      key={election.id}
-                      election={election}
-                      hasVoted={votedElectionIds.has(election.id)}
-                      onVote={onVote}
-                      onViewResults={onViewResults}
-                  />
-              ))}
+              {filteredElections.map(election => {
+                  return (
+                    <ElectionCard
+                        key={election.id}
+                        election={election}
+                        hasVoted={election.hasVoted || false}
+                        onVote={onVote}
+                        onViewResults={onViewResults}
+                        isAdmin={isAdmin}
+                    />
+                );
+              })}
             </div>
+
         )}
       </div>
   );

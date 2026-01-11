@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import {User} from "../api.ts";
+import {login, Role, User} from "./api.ts";
 
 // Interfaccia per l'utente
 
@@ -8,14 +8,16 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   loading: boolean;
-  signIn: (matricola: string, password: string) => Promise<void>;
+  signIn: (matricola: string, password: string) => Promise<{
+    token: string;
+    role: Role;
+    id: number;
+    matricola: string;
+  }>;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-// URL base della tua API
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
@@ -53,34 +55,40 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const signIn = async (matricola: string, password: string) => {
-    const response = await fetch(`${API_BASE_URL}/api/login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ matricola, password }),
-    });
+    try {
+      // 1️⃣ Chiamata alla tua API centralizzata
+      const data = await login(matricola, password);
 
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Errore durante il login');
+      // 2️⃣ Costruzione oggetto User basato sulla risposta del backend
+      const userData: User = {
+        full_name: "",
+        id: data.id,
+        matricola: data.matricola,
+        role: data.role
+      };
+
+      // 3️⃣ Salvataggio dati nel localStorage
+      localStorage.setItem("auth_token", data.token);
+      localStorage.setItem("auth_user", JSON.stringify(userData));
+
+      // 4️⃣ Aggiorna stato globale (es. React state o context)
+      setToken(data.token);
+      setUser(userData);
+
+      return data;
+    } catch (error: any) {
+      // 5️⃣ Gestione errore coerente
+      let message = "Errore durante il login";
+
+      // Axios style
+      if (error?.response?.data?.error) {
+        message = error.response.data.error;
+      } else if (error?.message) {
+        message = error.message;
+      }
+
+      throw new Error(message);
     }
-
-    const data = await response.json();
-
-    // Salva il token e i dati utente
-    const userData: User = {
-      id: 0, // L'API non restituisce l'ID, potresti volerlo aggiungere
-      matricola: matricola,
-      full_name: data.full_name,
-      role: data.role,
-    };
-
-    localStorage.setItem('auth_token', data.token);
-    localStorage.setItem('auth_user', JSON.stringify(userData));
-
-    setToken(data.token);
-    setUser(userData);
   };
 
   const signOut = async () => {

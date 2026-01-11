@@ -9,7 +9,9 @@ require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');       // Per creare e verificare i token di sessione
 const bcrypt = require('bcryptjs');      // Per hashing e "salting" delle password
-const db = require('./db');               
+const db = require('./db');
+const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
 // Moduli Hyperledger Fabric
 const FabricCAServices = require('fabric-ca-client');
@@ -19,6 +21,8 @@ const { Wallets, Gateway } = require('fabric-network');
 const fs = require('fs');
 const path = require('path');
 
+const { MerkleTree } = require('merkletreejs');
+const SHA256 = require('crypto-js/sha256');
 // --- 2. CONFIGURAZIONE E COSTANTI ---
 
 const app = express();
@@ -57,7 +61,7 @@ const cors = require('cors');
 
 // AGGIUNGI QUESTA CONFIGURAZIONE CORS
 app.use(cors({
-    origin: 'http://localhost:5174', // URL del tuo frontend Vite
+    origin: 'http://localhost:5173', // URL del tuo frontend Vite
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
@@ -108,9 +112,15 @@ const isAdmin = (req, res, next) => {
     next();
 };
 
-
 const isSuperAdmin = (req, res, next) => {
     if (req.user.role !== 'super_admin') {
+        return res.status(403).json({ error: 'Accesso negato: questa azione richiede privilegi di amministratore.' });
+    }
+    next();
+};
+
+const isAdminOrSuperAdmin = (req, res, next) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
         return res.status(403).json({ error: 'Accesso negato: questa azione richiede privilegi di amministratore.' });
     }
     next();
@@ -184,6 +194,462 @@ async function connectToGateway(identityName) {
     return { gateway, contract };
 }
 
+// --- 1. ENDPOINT DELL'API ACCESSO ---
+/**
+ * [PROTETTO: SUPERADMIN] Crea un nuovo utente (studente, admin o super_admin) nel DB
+ * NOTA: Solo super_admin può creare altri admin o super_admin
+ */
+app.post(
+    "/api/superadmin/create-user",
+    verifyToken,
+    isSuperAdmin,
+    async (req, res) => {
+
+        try {
+            const { matricola, password, role, fullName } = req.body;
+
+            // 1️⃣ Validazione input
+            if (!matricola || !password || !role || !fullName) {
+                return res.status(400).json({
+                    error: "Matricola, password, nome completo e ruolo richiesti",
+                });
+            }
+
+            if (!["student", "admin", "super_admin"].includes(role)) {
+                return res.status(400).json({
+                    error: 'Ruolo non valido. Usare "student", "admin" o "super_admin".',
+                });
+            }
+
+            // 2️⃣ Controllo ruolo (ridondante ma sicuro)
+            if (req.user.role !== "super_admin") {
+                return res.status(403).json({
+                    error: "Solo i super admin possono creare un nuovo elettore!",
+                });
+            }
+
+            // 3️⃣ Controllo ESISTENZA matricola (PRIMA dell’insert)
+            const existingUser = await db.query(
+                "SELECT id FROM users WHERE matricola = $1",
+                [matricola]
+            );
+
+            if (existingUser.rowCount > 0) {
+                return res.status(409).json({
+                    error: "Matricola già presente nel sistema",
+                });
+            }
+
+            // 4️⃣ Hash password
+            const passwordHash = await bcrypt.hash(password, 10);
+
+            // 5️⃣ Transazione
+            await db.query("BEGIN");
+
+            const insert = await db.query(
+                `INSERT INTO users (matricola, password_hash, full_name, role)
+         VALUES ($1,$2,$3,$4)
+         RETURNING id, matricola, full_name, role`,
+                [matricola, passwordHash, fullName, role]
+            );
+
+            /*
+            try {
+              await registerVoterOnBlockchain(matricola);
+            } catch (bcErr) {
+              await client.query("ROLLBACK");
+              return res.status(500).json({
+                error: "Registrazione blockchain fallita — operazione annullata",
+              });
+            }
+            */
+
+            await db.query("COMMIT");
+
+            return res.status(201).json({
+                message: "Utente creato con successo"
+            });
+        } catch (error) {
+            await db.query("ROLLBACK").catch(() => {});
+
+            // 6️⃣ Gestione errori Postgres (fallback)
+            if (error.code === "23505") {
+                return res.status(409).json({
+                    error: "Matricola già esistente",
+                });
+            }
+
+            console.error("Errore in /api/superadmin/create-user:", error);
+            return res.status(500).json({
+                error: "Errore interno del server",
+            });
+        }
+    }
+);
+
+/**
+ * [PUBBLICO] Login
+ */
+app.post('/api/login', async (req, res) => {
+    try {
+        const { matricola, password } = req.body;
+        if (!matricola || !password) {
+            return res.status(400).json({ error: 'Matricola e password richiesti' });
+        }
+
+        const result = await db.query('SELECT * FROM users WHERE matricola = $1', [matricola]);
+        const user = result.rows[0];
+
+        if (!user) {
+            return res.status(401).json({ error: 'Credenziali non valide' });
+        }
+
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) {
+            return res.status(401).json({ error: 'Credenziali non valide' });
+        }
+
+        const payload = {
+            id: user.id,
+            matricola: user.matricola,
+            role: user.role
+        };
+
+        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '10h' });
+
+        res.json({
+            message: 'Login effettuato con successo',
+            token,
+            role: user.role,
+            id: user.id,
+            matricola: user.matricola
+        });
+
+    } catch (error) {
+        console.error("Errore in /api/login:", error);
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
+
+
+// --- 2. ENDPOINT DELL'API ELEZIONE ---
+/**
+ * [PRIVATO] Ottieni tutti gli studenti
+ */
+app.get('/api/students', verifyToken, async (req, res) => {
+    try {
+        const result = await db.query(
+            'SELECT id, matricola, full_name FROM users WHERE role = $1 and state = true',
+            ['student']
+        );
+
+        res.json({
+            count: result.rows.length,
+            students: result.rows
+        });
+
+    } catch (error) {
+        console.error("Errore in GET /api/students:", error);
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
+
+/**
+ * [PROTETTO: TUTTI] Ritorna lista di tutte le elezioni
+ */
+app.get('/api/elections', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        const result = await db.query(
+            `
+                SELECT
+                    e.*,
+                    EXISTS (
+                        SELECT 1
+                        FROM votes v
+                        WHERE v.election_id = e.id
+                          AND v.user_id = $1
+                    ) AS "hasVoted"
+                FROM elections e
+                ORDER BY e.start_date DESC
+            `,
+            [userId]
+        );
+
+        res.json({
+            count: result.rows.length,
+            elections: result.rows
+        });
+
+    } catch (error) {
+        console.error("Errore in /api/elections:", error);
+        res.status(500).json({ error: error.toString() });
+    }
+});
+
+/**
+ * [PROTETTO: ADMIN] Crea una nuova elezione
+ */
+app.post('/api/create-election', verifyToken, isAdminOrSuperAdmin, async (req, res) => {
+    try {
+        const { title, description, start_date, end_date, candidates } = req.body;
+
+        // --- VALIDAZIONE ---
+        if (!title || typeof title !== 'string' || title.length > 255) {
+            return res.status(400).json({ error: 'Titolo non valido' });
+        }
+        if (!description || typeof description !== 'string') {
+            return res.status(400).json({ error: 'Descrizione non valida' });
+        }
+        if (!start_date || !end_date || isNaN(Date.parse(start_date)) || isNaN(Date.parse(end_date))) {
+            return res.status(400).json({ error: 'Date non valide' });
+        }
+        if (new Date(start_date) >= new Date(end_date)) {
+            return res.status(400).json({ error: 'La data di inizio deve essere prima della fine' });
+        }
+        if (!Array.isArray(candidates) || candidates.length === 0) {
+            return res.status(400).json({ error: 'Deve esserci almeno un candidato' });
+        }
+        for (const c of candidates) {
+            if (!c.name || !c.description) {
+                return res.status(400).json({ error: 'Ogni candidato deve avere nome e descrizione' });
+            }
+        }
+
+        // --- CREAZIONE ID ELEZIONE ---
+        const electionId = `ELEC-${uuidv4()}`;
+
+        // --- HASH dei dati per blockchain ---
+        const electionData = JSON.stringify({ title, description, start_date, end_date, candidates });
+        const electionHash = crypto.createHash('sha256').update(electionData).digest('hex');
+
+        // --- TRANSAZIONE BLOCKCHAIN ---
+        //const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        //await contract.submitTransaction('CreateElection', electionId, electionHash);
+        //gateway.disconnect();
+
+        // --- TRANSAZIONE DB ---
+        await db.query('BEGIN');
+        const candidatesJSON = JSON.stringify(candidates);
+        const dbResult = await db.query(`
+            INSERT INTO elections (id, title, description, candidates, blockchain_hash, start_date, end_date, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        `, [electionId, title, description, candidatesJSON, electionHash, start_date, end_date, req.user.id]);
+        await db.query('COMMIT');
+
+        res.status(201).json({
+            message: `Elezione "${title}" creata con successo`,
+        });
+
+    } catch (error) {
+        await db.query('ROLLBACK');
+        console.error("Errore in /api/create-election:", error);
+        res.status(500).json({ error: error.message || 'Errore interno del server' });
+    }
+});
+
+/**
+ * [PROTETTO: ADMIN] Aggiorna lo stato di un'elezione (aperta/chiusa)
+ */
+app.post('/api/elections/:id/close', verifyToken, isAdminOrSuperAdmin, async (req, res) => {
+    try {
+        const electionId = req.params.id;
+
+        // --- Recupera tutti i voti ---
+        const votesRes = await db.query(`SELECT vote_hash, candidate_id FROM votes WHERE election_id=$1`, [electionId]);
+
+        // --- Genera Merkle Tree ---
+        const voteHashes = votesRes.rows.map(v => v.vote_hash);
+        const leaves = voteHashes.map(vh => Buffer.from(vh, 'hex'));
+        const tree = new MerkleTree(leaves, SHA256);
+        const merkleRoot = tree.getRoot().toString('hex');
+
+        // --- Calcolo risultati per candidato ---
+        const resultsMap = {};
+        votesRes.rows.forEach(v => {
+            resultsMap[v.candidate_id] = (resultsMap[v.candidate_id] || 0) + 1;
+        });
+        const resultsArray = Object.entries(resultsMap).map(([candidate_id, votes]) => ({ candidate_id, votes }));
+        const resultsJSON = JSON.stringify(resultsArray);
+        const resultsHash = crypto.createHash('sha256').update(resultsJSON).digest('hex');
+
+        // --- Salvataggio hash sulla blockchain ---
+        //const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        //await contract.submitTransaction('CloseElection', electionId, merkleRoot, resultsHash);
+        //gateway.disconnect();
+
+        // --- Aggiornamento DB ---
+        await db.query('BEGIN');
+        await db.query(`
+            UPDATE elections
+            SET is_active=false, merkle_root=$1, results_hash=$2
+            WHERE id=$3
+        `, [merkleRoot, resultsHash, electionId]);
+        await db.query('COMMIT');
+
+        res.status(200).json({
+            message: 'Elezione chiusa con successo',
+            results: resultsArray
+        });
+
+    } catch (error) {
+        await db.query('ROLLBACK');
+        console.error("Errore in /api/elections/:id/close:", error);
+        res.status(500).json({ error: error.message || 'Errore interno' });
+    }
+});
+
+/**
+ * [PROTETTO] Recupera i risultati di un'elezione dalla blockchain
+ */
+app.get('/api/elections/:id/results', verifyToken, async (req, res) => {
+    try {
+        const electionId = req.params.id;
+
+        const votesRes = await db.query(
+            `
+                SELECT
+                    (c->>'id')::int AS candidate_id,
+                    c->>'name' AS candidate_name,
+                    c->>'description' AS candidate_description,
+                    COUNT(v.candidate_id) AS votes
+                FROM elections e
+                    JOIN LATERAL jsonb_array_elements(e.candidates) AS c ON TRUE
+                    LEFT JOIN votes v
+                    ON v.candidate_id = (c->>'id')::int
+                    AND v.election_id = e.id
+                WHERE e.id = $1
+                GROUP BY c
+                ORDER BY votes DESC;
+            `,
+            [electionId]
+        );
+
+        const results = votesRes.rows.map(row => ({
+            candidate_id: row.candidate_id,
+            candidate_name: row.candidate_name,
+            candidate_description: row.candidate_description,
+            votes: row.votes
+        }));
+
+        res.status(200).json({ electionId, results });
+
+    } catch (error) {
+        console.error("Errore in /api/elections/:id/results:", error);
+        res.status(500).json({ error: error.message || 'Errore interno' });
+    }
+});
+
+
+// --- 3. ENDPOINT DELL'API VOTAZIONE ---
+/**
+ * [PROTETTO] Verifica se lo studente può votare in un'elezione
+ */
+app.get('/api/elections/:id/can-vote', verifyToken, async (req, res) => {
+    try {
+        const electionId = req.params.id;
+        const studentId = req.user.id;
+
+        // Controlla esistenza e stato elezione nel DB
+        const election = await db.query(
+            'SELECT * FROM elections WHERE id=$1 AND is_active=true',
+            [electionId]
+        );
+        if (!election.rows.length) {
+            return res.status(400).json({ canVote: false, message: 'Elezione non attiva o inesistente' });
+        }
+
+    // Controlla se lo studente ha già votato
+        const rel = await db.query(
+            'SELECT 1 FROM votes WHERE user_id=$1 AND election_id=$2',
+            [studentId, electionId]
+        );
+
+        const hasVoted = rel.rows.length > 0;
+
+        res.json({
+            canVote: !hasVoted,
+            hasVoted,
+            message: hasVoted ? 'Hai già votato' : 'Puoi votare'
+        });
+
+
+    } catch (error) {
+        console.error("Errore in /api/elections/:id/can-vote:", error);
+        res.status(500).json({ error: error.toString() });
+    }
+});
+
+/**
+ * [PROTETTO] Vota per un candidato
+ */
+app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
+    try {
+        const electionId = req.params.id;
+        const { candidateId } = req.body;
+        const userId = req.user.id;
+
+        if (!candidateId) {
+            return res.status(400).json({ error: 'CandidateId mancante' });
+        }
+
+        // --- Controllo se elezione esiste e attiva ---
+        const electionRes = await db.query(`
+            SELECT * FROM elections WHERE id=$1
+        `, [electionId]);
+        if (electionRes.rows.length === 0) return res.status(404).json({ error: 'Elezione non trovata' });
+
+        const election = electionRes.rows[0];
+        const now = new Date();
+        if (now < new Date(election.start_date) || now > new Date(election.end_date)) {
+            return res.status(400).json({ error: 'Elezione non attiva' });
+        }
+
+        // --- Controllo se utente ha già votato ---
+        const voteCheck = await db.query(`
+            SELECT * FROM votes WHERE election_id=$1 AND user_id=$2
+        `, [electionId, userId]);
+        if (voteCheck.rows.length > 0) {
+            return res.status(400).json({ error: 'Hai già votato' });
+        }
+
+        // --- Preparazione voto ---
+        const voteData = JSON.stringify({ electionId, candidateId, userId });
+        const voteHash = crypto.createHash('sha256').update(voteData).digest('hex');
+
+        // --- Salvataggio blockchain ---
+        //const { gateway, contract } = await connectToGateway(ORG_USER);
+        //await contract.submitTransaction('CastVote', electionId, voteHash);
+        //gateway.disconnect();
+
+        // --- Salvataggio DB ---
+        await db.query('BEGIN');
+        await db.query(`
+            INSERT INTO votes (election_id, user_id, candidate_id, vote_hash)
+            VALUES ($1,$2,$3,$4)
+        `, [electionId, userId, candidateId, voteHash]);
+        await db.query('COMMIT');
+
+        res.status(201).json({ message: 'Voto registrato con successo' });
+
+    } catch (error) {
+        await db.query('ROLLBACK');
+        console.error("Errore in /api/elections/:id/vote:", error);
+        res.status(500).json({ error: error.message || 'Errore interno' });
+    }
+});
+
+
+
+
+
+
+
+
+
+
+// FUORI USO
 /**
  * Crea l'identità di un elettore sulla blockchain (CA + Ledger).
  * Questa funzione è chiamata internamente da /api/admin/create-user.
@@ -294,316 +760,7 @@ async function isVoterOnLedger(matricola) {
     }
 }
 
-// --- 5. ENDPOINT DELL'API ---
-/**
- * [PROTETTO: SUPERADMIN] Crea un nuovo utente (studente, admin o super_admin) nel DB
- * e crea la sua identità sulla blockchain.
- * NOTA: Solo super_admin può creare altri admin o super_admin
- */
-app.post('/api/superadmin/create-user', verifyToken, isSuperAdmin, async (req, res) => {
-    try {
-        const { matricola, password, role, fullName } = req.body;
-        if (!matricola || !password || !role || !fullName) {
-            return res.status(400).json({ error: 'Matricola, password, nome completo e ruolo richiesti' });
-        }
-        if (role !== 'student' && role !== 'admin' && role !== 'super_admin') {
-            return res.status(400).json({ error: 'Ruolo non valido. Usare "student", "admin" o "super_admin".' });
-        }
 
-        // SICUREZZA: Solo super_admin può creare admin o super_admin
-        if (req.user.role !== 'super_admin') {
-            return res.status(403).json({ error: 'Solo i super admin possono creare un nuovo elettore!' });
-        }
-
-        // SICUREZZA: Genera HASH e SALT
-        const saltRounds = 10;
-        const passwordHash = await bcrypt.hash(password, saltRounds);
-
-        try {
-            await db.query('BEGIN');
-            const insert = await db.query(
-                'INSERT INTO users (matricola, password_hash, full_name, role) VALUES ($1,$2,$3,$4) RETURNING id, matricola, full_name, role',
-                [matricola, passwordHash, fullName, role]
-            );
-
-            try {
-                await registerVoterOnBlockchain(matricola);
-            } catch (bcErr) {
-                await db.query('ROLLBACK');
-                console.error('BC registration failed, rollback DB insert:', bcErr);
-                return res.status(500).json({ error: 'Registrazione blockchain fallita — operazione annullata' });
-            }
-
-            await db.query('COMMIT');
-            res.status(201).json({ message: 'Utente creato con successo (DB e Blockchain)', user: insert.rows[0] });
-
-        } catch (err) {
-            await db.query('ROLLBACK').catch(()=>{});
-            // gestione errori (unique_violation ecc.)
-        }
-
-    } catch (error) {
-        console.error("Errore in /api/admin/create-user:", error);
-        if (error.code === '23505') { // Codice errore Postgres per "unique_violation"
-            return res.status(409).json({ error: 'Matricola già esistente' });
-        }
-        res.status(500).json({ error: 'Errore interno del server' });
-    }
-});
-
-/**
- * [PUBBLICO] Login
- */
-app.post('/api/login', async (req, res) => {
-    try {
-        const { matricola, password } = req.body;
-        if (!matricola || !password) {
-            return res.status(400).json({ error: 'Matricola e password richiesti' });
-        }
-
-        const result = await db.query('SELECT * FROM users WHERE matricola = $1', [matricola]);
-        const user = result.rows[0];
-
-        if (!user) {
-            return res.status(401).json({ error: 'Credenziali non valide' });
-        }
-
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) {
-            return res.status(401).json({ error: 'Credenziali non valide' });
-        }
-
-        // --- CHECK SU BLOCKCHAIN ---
-        /*try {
-            const existsOnLedger = await isVoterOnLedger(matricola);
-            if (!existsOnLedger) {
-                // scelta di policy: 401 è coerente con "credenziali non valide"
-                return res.status(401).json({ error: 'Credenziali non valide' });
-            }
-        } catch (bcErr) {
-            console.error('Errore verificando ledger:', bcErr);
-            // comportamento consigliato: fallire safe o permettere login? Qui blocco per sicurezza
-            return res.status(500).json({ error: 'Impossibile verificare stato su blockchain' });
-        }*/
-
-        const payload = {
-            id: user.id,
-            matricola: user.matricola,
-            role: user.role
-        };
-
-        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
-
-        res.json({
-            message: 'Login effettuato con successo',
-            token,
-            role: user.role
-        });
-
-    } catch (error) {
-        console.error("Errore in /api/login:", error);
-        res.status(500).json({ error: 'Errore interno del server' });
-    }
-});
-
-
-// ====================================
-// API PROTETTE - ELEZIONI
-// ====================================
-
-/**
- * [PRIVATO] Ottieni tutti gli studenti
- */
-app.get('/api/students', async (req, res) => {
-    try {
-        const result = await db.query(
-            'SELECT id, matricola, full_name FROM users WHERE role = $1 and state = true',
-            ['student']
-        );
-
-        res.json({
-            count: result.rows.length,
-            students: result.rows
-        });
-
-    } catch (error) {
-        console.error("Errore in GET /api/students:", error);
-        res.status(500).json({ error: 'Errore interno del server' });
-    }
-});
-
-/**
- * [PROTETTO: TUTTI] Ritorna lista di tutte le elezioni
- */
-app.get('/api/elections', verifyToken, async (req, res) => {
-    try {
-        const voterID = req.user.matricola;
-        const { gateway, contract } = await connectToGateway(voterID);
-
-        const result = await contract.evaluateTransaction('GetAllElections');
-
-        gateway.disconnect();
-        res.status(200).json(JSON.parse(result.toString()));
-    } catch (error) {
-        console.error("Errore in /api/elections:", error);
-        res.status(500).json({ error: error.toString() });
-    }
-});
-
-/**
- * [PROTETTO: TUTTI] Ottiene i dettagli di una singola elezione
- */
-app.get('/api/election/:electionID', verifyToken, async (req, res) => {
-    try {
-        const { electionID } = req.params;
-        const voterID = req.user.matricola;
-
-        const { gateway, contract } = await connectToGateway(voterID);
-
-        const result = await contract.evaluateTransaction('GetElection', electionID);
-
-        gateway.disconnect();
-        res.status(200).json(JSON.parse(result.toString()));
-    } catch (error) {
-        console.error("Errore in /api/election:", error);
-        res.status(500).json({ error: error.toString() });
-    }
-});
-
-/**
- * [PROTETTO: TUTTI] Verifica se l'utente ha votato in un'elezione
- */
-app.get('/api/has-voted/:electionID', verifyToken, async (req, res) => {
-    try {
-        const { electionID } = req.params;
-        const voterID = req.user.matricola;
-
-        const { gateway, contract } = await connectToGateway(voterID);
-
-        const result = await contract.evaluateTransaction('HasVoted', electionID, voterID);
-
-        gateway.disconnect();
-        res.status(200).json({ hasVoted: result.toString() === 'true' });
-    } catch (error) {
-        console.error("Errore in /api/has-voted:", error);
-        res.status(500).json({ error: error.toString() });
-    }
-});
-
-/**
- * [PROTETTO: ADMIN] Crea una nuova elezione
- */
-app.post('/api/create-election', verifyToken, isAdmin, async (req, res) => {
-    try {
-        const { id, title, proposals } = req.body;
-        if (!id || !title || !proposals || !Array.isArray(proposals)) {
-            return res.status(400).json({ error: 'Body richiesta non valido' });
-        }
-        const proposalsJSON = JSON.stringify(proposals);
-
-        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
-
-        await contract.submitTransaction('CreateElection', id, title, proposalsJSON);
-
-        gateway.disconnect();
-        res.status(201).json({ message: `Elezione ${id} creata con successo` });
-    } catch (error) {
-        console.error("Errore in /api/create-election:", error);
-        const errorString = error.toString();
-        if (errorString.includes('Accesso negato')) {
-            return res.status(403).json({ error: errorString });
-        }
-        res.status(500).json({ error: errorString });
-    }
-});
-
-/**
- * [PROTETTO: TUTTI] Esprime un voto
- */
-app.post('/api/vote', verifyToken, async (req, res) => {
-    try {
-        const { electionID, proposal } = req.body;
-        const voterID = req.user.matricola;
-
-        if (!electionID || !proposal) {
-            return res.status(400).json({ error: 'electionID e proposal richiesti' });
-        }
-
-        const { gateway, contract } = await connectToGateway(voterID);
-
-        const transaction = contract.createTransaction('CastVote');
-        transaction.setTransient({
-            vote_choice: Buffer.from(proposal)
-        });
-
-        await transaction.submit(electionID);
-
-        gateway.disconnect();
-        res.status(200).json({ message: `Voto di ${voterID} per ${proposal} registrato con successo!` });
-    } catch (error) {
-        console.error("Errore in /api/vote:", error);
-        const errorString = error.toString();
-        if (errorString.includes('ha già votato') ||
-            errorString.includes('Accesso negato') ||
-            errorString.includes('non trovata') ||
-            errorString.includes('è chiusa') ||
-            errorString.includes('non registrato')
-        ) {
-            return res.status(403).json({ error: errorString });
-        }
-        res.status(500).json({ error: errorString });
-    }
-});
-
-/**
- * [PROTETTO: TUTTI] Legge i risultati di un'elezione
- */
-app.get('/api/results/:electionID', verifyToken, async (req, res) => {
-    try {
-        const { electionID } = req.params;
-        const queryUser = req.user.matricola;
-
-        const { gateway, contract } = await connectToGateway(queryUser);
-
-        const result = await contract.evaluateTransaction('GetResults', electionID);
-
-        gateway.disconnect();
-        res.status(200).json(JSON.parse(result.toString()));
-    } catch (error) {
-        console.error("Errore in /api/results:", error);
-        const errorString = error.toString();
-        if (errorString.includes('è ancora aperta')) {
-            return res.status(403).json({ error: errorString });
-        }
-        res.status(500).json({ error: errorString });
-    }
-});
-
-/**
- * [PROTETTO: ADMIN] Chiude un'elezione
- */
-app.post('/api/close-election', verifyToken, isAdmin, async (req, res) => {
-    try {
-        const { electionID } = req.body;
-        if (!electionID) {
-            return res.status(400).json({ error: 'electionID richiesto' });
-        }
-
-        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
-
-        await contract.submitTransaction('CloseElection', electionID);
-
-        gateway.disconnect();
-        res.status(200).json({ message: `Elezione ${electionID} chiusa con successo` });
-    } catch (error) {
-        console.error("Errore in /api/close-election:", error);
-        const errorString = error.toString();
-        if (errorString.includes('è già chiusa')) {
-            return res.status(409).json({ error: errorString });
-        }
-        res.status(500).json({ error: errorString });
-    }
-});
 
 // --- 6. AVVIO SERVER ---
 
