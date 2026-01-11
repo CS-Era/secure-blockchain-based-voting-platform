@@ -253,17 +253,6 @@ app.post(
                 [matricola, passwordHash, fullName, role]
             );
 
-            /*
-            try {
-              await registerVoterOnBlockchain(matricola);
-            } catch (bcErr) {
-              await client.query("ROLLBACK");
-              return res.status(500).json({
-                error: "Registrazione blockchain fallita — operazione annullata",
-              });
-            }
-            */
-
             await db.query("COMMIT");
 
             return res.status(201).json({
@@ -425,9 +414,9 @@ app.post('/api/create-election', verifyToken, isAdminOrSuperAdmin, async (req, r
         const electionHash = crypto.createHash('sha256').update(electionData).digest('hex');
 
         // --- TRANSAZIONE BLOCKCHAIN ---
-        //const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
-        //await contract.submitTransaction('CreateElection', electionId, electionHash);
-        //gateway.disconnect();
+        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        await contract.submitTransaction('CreateElection', electionId, electionHash);
+        gateway.disconnect();
 
         // --- TRANSAZIONE DB ---
         await db.query('BEGIN');
@@ -475,9 +464,9 @@ app.post('/api/elections/:id/close', verifyToken, isAdminOrSuperAdmin, async (re
         const resultsHash = crypto.createHash('sha256').update(resultsJSON).digest('hex');
 
         // --- Salvataggio hash sulla blockchain ---
-        //const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
-        //await contract.submitTransaction('CloseElection', electionId, merkleRoot, resultsHash);
-        //gateway.disconnect();
+        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        await contract.submitTransaction('CloseElection', electionId, merkleRoot, resultsHash);
+        gateway.disconnect();
 
         // --- Aggiornamento DB ---
         await db.query('BEGIN');
@@ -501,7 +490,7 @@ app.post('/api/elections/:id/close', verifyToken, isAdminOrSuperAdmin, async (re
 });
 
 /**
- * [PROTETTO] Recupera i risultati di un'elezione dalla blockchain
+ * [PROTETTO] Recupera i risultati di un'elezione
  */
 app.get('/api/elections/:id/results', verifyToken, async (req, res) => {
     try {
@@ -619,9 +608,9 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
         const voteHash = crypto.createHash('sha256').update(voteData).digest('hex');
 
         // --- Salvataggio blockchain ---
-        //const { gateway, contract } = await connectToGateway(ORG_USER);
-        //await contract.submitTransaction('CastVote', electionId, voteHash);
-        //gateway.disconnect();
+        const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+        await contract.submitTransaction('CastVote', electionId, voteHash);
+        gateway.disconnect();
 
         // --- Salvataggio DB ---
         await db.query('BEGIN');
