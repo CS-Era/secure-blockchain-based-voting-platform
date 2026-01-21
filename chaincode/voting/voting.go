@@ -12,7 +12,7 @@ type ElectionChaincode struct {
 	contractapi.Contract
 }
 
-// Election rappresenta un’elezione
+// Struttura di una elezione
 type Election struct {
 	ID           string `json:"id"`
 	ElectionHash string `json:"election_hash"`
@@ -20,17 +20,15 @@ type Election struct {
 	ResultsHash  string `json:"results_hash"`
 }
 
-// Vote rappresenta un voto hashato
+// Struttura di un voto
 type Vote struct {
-	ElectionID string `json:"election_id"`
-	VoteHash   string `json:"vote_hash"`
+	ElectionID  string `json:"election_id"`
+	VoterIDHash string `json:"voter_id_hash"`
+	VoteHash    string `json:"vote_hash"`
 }
 
-// ---------------------------
-// CREATE ELECTION
-// ---------------------------
+// Creazione di una elezione
 func (c *ElectionChaincode) CreateElection(ctx contractapi.TransactionContextInterface, electionID string, electionHash string) error {
-
 	exists, err := ctx.GetStub().GetState(electionID)
 	if err != nil {
 		return fmt.Errorf("errore controllando esistenza elezione: %v", err)
@@ -48,32 +46,46 @@ func (c *ElectionChaincode) CreateElection(ctx contractapi.TransactionContextInt
 	return ctx.GetStub().PutState(electionID, electionBytes)
 }
 
-// ---------------------------
-// CAST VOTE
-// ---------------------------
-func (c *ElectionChaincode) CastVote(ctx contractapi.TransactionContextInterface, electionID string, voteHash string) error {
+// Votazione
+func (c *ElectionChaincode) CastVote(ctx contractapi.TransactionContextInterface, electionID string, voterIDHash string, voteHash string) error {
 
+	// 1. Verifica esistenza elezione
 	electionBytes, err := ctx.GetStub().GetState(electionID)
 	if err != nil || electionBytes == nil {
 		return fmt.Errorf("elezione non trovata: %v", err)
 	}
 
-	vote := Vote{
-		ElectionID: electionID,
-		VoteHash:   voteHash,
+	// 2. Check anti doppio voto con chiave unica
+	voterCheckKey := fmt.Sprintf("check-%s-%s", electionID, voterIDHash)
+	alreadyVoted, err := ctx.GetStub().GetState(voterCheckKey)
+	if err != nil {
+		return fmt.Errorf("errore lettura stato elettore: %v", err)
+	}
+	if alreadyVoted != nil {
+		return fmt.Errorf("questo elettore ha già votato per questa elezione")
 	}
 
-	// La chiave per ogni voto può essere "vote-{electionID}-{hash}"
-	voteKey := fmt.Sprintf("vote-%s-%s", electionID, voteHash)
+	// 3. Creazione oggetto Voto
+	vote := Vote{
+		ElectionID:  electionID,
+		VoterIDHash: voterIDHash,
+		VoteHash:    voteHash,
+	}
+
+	// 4. Salvataggio del Voto
+	voteKey := fmt.Sprintf("vote-%s-%s", electionID, voterIDHash)
 	voteBytes, _ := json.Marshal(vote)
-	return ctx.GetStub().PutState(voteKey, voteBytes)
+	err = ctx.GetStub().PutState(voteKey, voteBytes)
+	if err != nil {
+		return fmt.Errorf("errore salvataggio voto: %v", err)
+	}
+
+	// Salviamo un flag leggero "true" nella chiave di controllo
+	return ctx.GetStub().PutState(voterCheckKey, []byte("true"))
 }
 
-// ---------------------------
-// CLOSE ELECTION
-// ---------------------------
+// Chiusura elezione
 func (c *ElectionChaincode) CloseElection(ctx contractapi.TransactionContextInterface, electionID string, merkleRoot string, resultsHash string) error {
-
 	electionBytes, err := ctx.GetStub().GetState(electionID)
 	if err != nil || electionBytes == nil {
 		return fmt.Errorf("elezione non trovata: %v", err)
