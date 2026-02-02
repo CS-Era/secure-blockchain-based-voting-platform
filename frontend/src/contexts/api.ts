@@ -202,3 +202,24 @@ export async function vote(electionId: string, candidateId: number) {
    UTILITY
 ------------------------------------------------------------------- */
 
+
+/* ------------------------------------------------------------------
+   VERIFICA MERKLE
+------------------------------------------------------------------- */
+
+export async function verifyVote(electionId: string, voteHash: string) {
+    const res = await api.get(`/elections/${electionId}/verify/${voteHash}`);
+    return res.data as {
+        electionId: string;
+        voteHash: string;
+        dbMerkleRoot: string;
+        onChainMerkleRoot: string;
+        proof: any[]; // MerkleProof type
+    };
+}
+
+export async function auditElection(electionId: string) {
+    const res = await api.get(`/elections/${electionId}/audit`);
+    return res.data as string[]; // Array di hash
+}
+

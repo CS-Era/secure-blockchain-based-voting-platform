@@ -34,8 +34,7 @@ const CA_REGISTRAR_PASS = process.env.CA_REGISTRAR_PASS;
 const JWT_SECRET = process.env.JWT_SECRET; 
 
 // SALT SEGRETO PER ANONIMIZZARE GLI STUDENTI SULLA BLOCKCHAIN
-// In produzione, questo valore deve stare nel file .env
-const VOTER_SECRET_SALT = process.env.VOTER_SECRET_SALT || "chiave_segreta_molto_lunga_e_complessa_2024";
+const VOTER_SECRET_SALT = process.env.VOTER_SECRET_SALT
 
 const CHANNEL_NAME = 'votingchannel';
 const CONTRACT_NAME = 'votingcc'; 
@@ -177,11 +176,10 @@ app.get('/api/students', verifyToken, async (req, res) => {
     }
 });
 
-// GET ELECTIONS (CORRETTO PER VOTERS_LOG)
+// GET ELECTIONS
 app.get('/api/elections', verifyToken, async (req, res) => {
     try {
         const userId = req.user.id;
-        // MODIFICA: Join su voters_log invece di votes
         const result = await db.query(`
             SELECT e.*, 
             EXISTS (SELECT 1 FROM voters_log v WHERE v.election_id = e.id AND v.user_id = $1) AS "hasVoted"
@@ -201,7 +199,6 @@ app.post('/api/create-election', verifyToken, isAdminOrSuperAdmin, async (req, r
         const { title, description, start_date, end_date, candidates } = req.body;
         const electionId = `ELEC-${uuidv4()}`;
         
-        // Blockchain Hash
         const electionData = JSON.stringify({ title, description, start_date, end_date, candidates });
         const electionHash = crypto.createHash('sha256').update(electionData).digest('hex');
 
@@ -221,27 +218,36 @@ app.post('/api/create-election', verifyToken, isAdminOrSuperAdmin, async (req, r
     }
 });
 
-// Chiusura dell'elezione
+// CLOSE ELECTION
 app.post('/api/elections/:id/close', verifyToken, isAdminOrSuperAdmin, async (req, res) => {
     try {
         const electionId = req.params.id;
 
-        const votesRes = await db.query(`SELECT vote_hash, candidate_id FROM ballot_box WHERE election_id=$1`, [electionId]);
+        // --- IMPORTANTE: ORDINAMENTO DETERMINISTICO ---
+        const votesRes = await db.query(
+            `SELECT vote_hash, candidate_id FROM ballot_box WHERE election_id=$1 ORDER BY vote_hash ASC`, 
+            [electionId]
+        );
 
         const voteHashes = votesRes.rows.map(v => v.vote_hash);
-        const leaves = voteHashes.map(vh => Buffer.from(vh, 'hex'));
+        
+        // --- FIX: Assicuriamo che le foglie siano stringhe ---
+        const leaves = voteHashes.map(vh => SHA256(vh).toString());
         const tree = new MerkleTree(leaves, SHA256);
         const merkleRoot = tree.getRoot().toString('hex');
 
+        // Calcolo risultati
         const resultsMap = {};
         votesRes.rows.forEach(v => { resultsMap[v.candidate_id] = (resultsMap[v.candidate_id] || 0) + 1; });
         const resultsArray = Object.entries(resultsMap).map(([candidate_id, votes]) => ({ candidate_id, votes }));
         const resultsHash = crypto.createHash('sha256').update(JSON.stringify(resultsArray)).digest('hex');
 
+        // Salvataggio su Blockchain
         const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
         await contract.submitTransaction('CloseElection', electionId, merkleRoot, resultsHash);
         gateway.disconnect();
 
+        // Aggiornamento DB
         await db.query(`UPDATE elections SET is_active=false, merkle_root=$1, results_hash=$2 WHERE id=$3`, 
             [merkleRoot, resultsHash, electionId]);
 
@@ -252,11 +258,10 @@ app.post('/api/elections/:id/close', verifyToken, isAdminOrSuperAdmin, async (re
     }
 });
 
-// GET RESULTS (CORRETTO PER BALLOT_BOX)
+// GET RESULTS
 app.get('/api/elections/:id/results', verifyToken, async (req, res) => {
     try {
         const electionId = req.params.id;
-        // MODIFICA: Join su ballot_box invece di votes
         const votesRes = await db.query(`
             SELECT (c->>'id')::int AS candidate_id, c->>'name' AS candidate_name, COUNT(v.candidate_id) AS votes
             FROM elections e
@@ -272,7 +277,7 @@ app.get('/api/elections/:id/results', verifyToken, async (req, res) => {
     }
 });
 
-// CAN VOTE (CORRETTO PER VOTERS_LOG)
+// CAN VOTE
 app.get('/api/elections/:id/can-vote', verifyToken, async (req, res) => {
     try {
         const electionId = req.params.id;
@@ -281,7 +286,6 @@ app.get('/api/elections/:id/can-vote', verifyToken, async (req, res) => {
         const election = await db.query('SELECT * FROM elections WHERE id=$1 AND is_active=true', [electionId]);
         if (!election.rows.length) return res.status(400).json({ canVote: false, message: 'Elezione chiusa' });
 
-        // MODIFICA: Check su voters_log
         const rel = await db.query('SELECT 1 FROM voters_log WHERE user_id=$1 AND election_id=$2', [studentId, electionId]);
         const hasVoted = rel.rows.length > 0;
 
@@ -291,7 +295,7 @@ app.get('/api/elections/:id/can-vote', verifyToken, async (req, res) => {
     }
 });
 
-// Votazione 
+// VOTE
 app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
     try {
         const electionId = req.params.id;
@@ -300,7 +304,6 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
 
         if (!candidateId) return res.status(400).json({ error: 'CandidateId mancante' });
 
-        // 1. Check Elezione
         const electionRes = await db.query(`SELECT * FROM elections WHERE id=$1`, [electionId]);
         if (electionRes.rows.length === 0) return res.status(404).json({ error: 'Elezione non trovata' });
         
@@ -310,11 +313,9 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
             return res.status(400).json({ error: 'Elezione non attiva' });
         }
 
-        // 2. Check DB preliminare (voters_log)
         const check = await db.query('SELECT 1 FROM voters_log WHERE election_id=$1 AND user_id=$2', [electionId, userId]);
         if (check.rows.length > 0) return res.status(400).json({ error: 'Hai già votato' });
 
-        // 3. Generazione Hash del Votante e del Voto
         const voterDataString = `${userId}-${electionId}-${VOTER_SECRET_SALT}`;
         const voterIDHash = crypto.createHash('sha256').update(voterDataString).digest('hex');
 
@@ -322,7 +323,6 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
         const votePayload = JSON.stringify({ electionId, candidateId, nonce: voteNonce });
         const voteHash = crypto.createHash('sha256').update(votePayload).digest('hex');
 
-        // 4. Invio Blockchain
         const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
         try {
             await contract.submitTransaction('CastVote', electionId, voterIDHash, voteHash);
@@ -336,14 +336,11 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
             gateway.disconnect();
         }
 
-        // 5. Salvataggio DB
         await db.query('BEGIN');
         try {
-            // Registro (Chi)
             await db.query('INSERT INTO voters_log (election_id, user_id, voter_hash) VALUES ($1, $2, $3)', 
                 [electionId, userId, voterIDHash]);
             
-            // Urna (Cosa - Anonimo)
             await db.query('INSERT INTO ballot_box (election_id, candidate_id, vote_hash) VALUES ($1, $2, $3)', 
                 [electionId, candidateId, voteHash]);
 
@@ -360,7 +357,78 @@ app.post('/api/elections/:id/vote', verifyToken, async (req, res) => {
     }
 });
 
-// --- AVVIO SERVER ---
+// ==========================================
+// VERIFICA MERKLE (VERIFICABILITÀ INDIVIDUALE)
+// ==========================================
+
+app.get('/api/elections/:id/verify/:voteHash', async (req, res) => {
+    try {
+        const { id: electionId, voteHash } = req.params;
+
+        const votesRes = await db.query(
+            `SELECT vote_hash FROM ballot_box WHERE election_id=$1 ORDER BY vote_hash ASC`, 
+            [electionId]
+        );
+
+        const voteHashes = votesRes.rows.map(v => v.vote_hash);
+        
+        if (!voteHashes.includes(voteHash)) {
+            return res.status(404).json({ error: 'Voto non trovato in questa elezione.' });
+        }
+
+        // 1. Costruisci albero con foglie String
+        const leaves = voteHashes.map(vh => SHA256(vh).toString());
+        const tree = new MerkleTree(leaves, SHA256);
+        
+        // 2. Genera Proof
+        const leaf = SHA256(voteHash).toString();
+        const rawProof = tree.getProof(leaf);
+        
+        // 3. Normalizza Proof per Frontend (Buffer -> Hex String)
+        const proof = rawProof.map(item => ({
+            position: item.position,
+            data: item.data.toString('hex') 
+        }));
+
+        const dbMerkleRoot = tree.getRoot().toString('hex');
+
+        let onChainMerkleRoot = null;
+        try {
+            const { gateway, contract } = await connectToGateway(ORG_ADMIN_USER);
+            const electionBytes = await contract.evaluateTransaction('QueryElection', electionId);
+            const electionData = JSON.parse(electionBytes.toString());
+            onChainMerkleRoot = electionData.merkle_root;
+            gateway.disconnect();
+        } catch (e) {
+            console.warn("Impossibile recuperare dati on-chain:", e);
+        }
+        
+        res.json({
+            electionId,
+            voteHash,
+            dbMerkleRoot,
+            onChainMerkleRoot,
+            proof
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/elections/:id/audit', async (req, res) => {
+    try {
+        const votesRes = await db.query(
+            `SELECT vote_hash FROM ballot_box WHERE election_id=$1 ORDER BY vote_hash ASC`, 
+            [req.params.id]
+        );
+        res.json(votesRes.rows.map(r => r.vote_hash));
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.listen(PORT, async () => {
     console.log(`🚀 Server API in ascolto su http://localhost:${PORT}`);
     await enrollAdmins();

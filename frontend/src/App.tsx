@@ -2,18 +2,23 @@ import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { LoginForm } from './components/LoginForm';
 import { AdminDashboard } from './components/AdminDashboard';
-import { SuperAdminDashboard } from './components/SuperAdminDashboard'; // NUOVO: componente per superadmin
+import { SuperAdminDashboard } from './components/SuperAdminDashboard';
 import { ElectionsList } from './components/ElectionsList';
 import { VotingModal } from './components/VotingModal';
 import { ResultsModal } from './components/ResultsModal';
-import { LogOut, Vote, Settings } from 'lucide-react';
-import {Election} from "./contexts/api.ts";
+// 1. IMPORTIAMO IL NUOVO COMPONENTE E LE ICONE AGGIUNTIVE
+import { VerifyVote } from './components/VerifyVote'; 
+import { LogOut, Vote, Settings, ShieldCheck, X } from 'lucide-react'; 
+import { Election } from "./contexts/api.ts";
 
 function AppContent() {
   const { user, loading, signOut } = useAuth();
 
   const [votingElection, setVotingElection] = useState<Election | null>(null);
   const [resultsElection, setResultsElection] = useState<Election | null>(null);
+
+  // 2. STATO PER GESTIRE LA VISIBILITÀ DEL MODALE DI VERIFICA
+  const [showVerify, setShowVerify] = useState(false);
 
   // forzare refresh dei figli quando necessario
   const [refreshKey] = useState(0);
@@ -52,8 +57,26 @@ function AppContent() {
 
   // Header + body condivisi; la parte centrale cambia in base ai ruoli
   return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-blue-100">
-        <header className="bg-white shadow-sm border-b border-gray-200">
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-blue-100 relative">
+        
+        {/* 3. MODALE DI VERIFICA (Renderizzato sopra tutto se attivo) */}
+        {showVerify && (
+            <div className="fixed inset-0 bg-black/60 z-[9999] flex items-center justify-center p-4 backdrop-blur-sm">
+              <div className="relative w-full max-w-lg">
+                <button 
+                  onClick={() => setShowVerify(false)}
+                  className="absolute -top-10 right-0 text-white hover:text-gray-200 transition"
+                  title="Chiudi"
+                >
+                  <X className="w-8 h-8" />
+                </button>
+                {/* Il componente VerifyVote viene renderizzato qui */}
+                <VerifyVote />
+              </div>
+            </div>
+        )}
+
+        <header className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -67,32 +90,44 @@ function AppContent() {
 
                 {/* badge ruolo */}
                 {isSuperAdmin ? (
-                    <span className="ml-4 flex items-center gap-1 px-3 py-1 bg-red-100 text-red-700 rounded-full text-sm font-medium">
+                    <span className="hidden md:flex ml-4 items-center gap-1 px-3 py-1 bg-red-100 text-red-700 rounded-full text-sm font-medium">
                   <Settings className="w-4 h-4" />
                   SuperAdmin
                 </span>
                 ) : isAdmin ? (
-                    <span className="ml-4 flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-medium">
+                    <span className="hidden md:flex ml-4 items-center gap-1 px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-medium">
                   <Settings className="w-4 h-4" />
                   Admin
                 </span>
                 ) : null}
               </div>
 
-              <button
-                  onClick={() => signOut()}
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition font-medium"
-              >
-                <LogOut className="w-4 h-4" />
-                Esci
-              </button>
+              <div className="flex items-center gap-3">
+                {/* 4. PULSANTE PER APRIRE LA VERIFICA */}
+                <button
+                    onClick={() => setShowVerify(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded-lg transition font-medium border border-purple-200"
+                    title="Verifica la validità del tuo voto sulla Blockchain"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span className="hidden sm:inline">Verifica Voto</span>
+                </button>
+
+                <button
+                    onClick={() => signOut()}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition font-medium"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden sm:inline">Esci</span>
+                </button>
+              </div>
             </div>
           </div>
         </header>
 
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           {isSuperAdmin ? (
-              // SuperAdminDashboard: spazio per funzioni globali (es. gestione amministratori, auditing)
+              // SuperAdminDashboard: spazio per funzioni globali
               <SuperAdminDashboard
                   onVote={(election) => setVotingElection(election)}
                   onViewResults={(election) => setResultsElection(election)}
