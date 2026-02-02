@@ -42,7 +42,7 @@ export const SuperAdminDashboard = ({ onVote, onViewResults, refreshKey }: Admin
                         className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition font-medium"
                     >
                         <UserPlus className="w-5 h-5" />
-                        Crea Studente
+                        Crea Utenza
                     </button>
 
                     <button
