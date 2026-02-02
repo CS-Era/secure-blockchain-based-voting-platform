@@ -24,4 +24,4 @@ This is a modern electronic voting system designed to bring trust, transparency,
 
 ## 📝 Scope
 
-This project is part of a Master's Exam in Computer Science, Cybersecurity curriculum.
+This project is part of a Data Security Master's Exam in Computer Science, Cybersecurity curriculum.
